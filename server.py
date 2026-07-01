@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """mcp-light — Local read-only MCP context server for DPMtF.
 
-Phase 1: Minimal read-only context retrieval.
-No database, no write access, no shell execution.
+Phase 3: Read-only context + SQLite (fixed queries).
+No write access, no shell execution, no free SQL.
 
 Listens on 127.0.0.1:9135/mcp (HTTP JSON-RPC).
 """
@@ -10,6 +10,7 @@ Listens on 127.0.0.1:9135/mcp (HTTP JSON-RPC).
 import json
 import os
 import re
+import sqlite3
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -62,6 +63,60 @@ NO_FRONTEND_IMPACT_BLOCK = """## Frontend Impact
 No frontend impact.
 
 Reason: <why frontend is not affected>"""
+
+# ── Database configuration (Phase 3) ───────────────────────────
+
+DB_PATH = "/home/svend/DPMtF-WebUI/databases/dpmtf.db"
+
+# Whitelisted tables for read-only queries
+ALLOWED_TABLES = {
+    "bridge_flows",
+    "bridge_roles",
+    "bridge_flow_steps",
+    "panel_subgroups",
+    "panel_subgroup_mappings",
+}
+
+# Whitelisted columns per table (empty = all columns allowed)
+ALLOWED_COLUMNS = {
+    "bridge_roles": {
+        "role_key", "tmux_session", "default_runtime", "default_provider",
+        "default_model", "config_dir", "model_type", "cloud_model",
+        "ollama_model", "governance_file", "role_type", "enter_command",
+        "is_active",
+    },
+}
+
+
+def _get_db_connection():
+    """Open a read-only SQLite connection."""
+    db_abs = os.path.abspath(DB_PATH)
+    conn = sqlite3.connect(f"file:{db_abs}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _safe_table(table_name):
+    """Validate table name against whitelist."""
+    if table_name not in ALLOWED_TABLES:
+        raise ValueError(f"Table not allowed: {table_name}")
+    return table_name
+
+
+def _safe_columns(table_name, columns):
+    """Filter columns to only allowed ones for the table."""
+    allowed = ALLOWED_COLUMNS.get(table_name)
+    if allowed is None:
+        return columns  # All columns allowed
+    return [c for c in columns if c in allowed]
+
+
+def _row_to_dict(row, table_name, columns):
+    """Convert a sqlite3.Row to a safe dict with only allowed columns."""
+    if row is None:
+        return None
+    safe_cols = _safe_columns(table_name, columns)
+    return {c: row[c] for c in safe_cols if c in row.keys()}
 
 
 # ── Security helpers ───────────────────────────────────────────
@@ -291,6 +346,97 @@ def tool_search_verdicts(query):
     return "\n".join(results[:50])
 
 
+# ── Database tool handlers (Phase 3) ───────────────────────────
+
+
+def tool_get_flow(flow_key):
+    """Return flow details from database."""
+    if not flow_key:
+        return "Error: flow_key is required."
+    conn = _get_db_connection()
+    try:
+        table = _safe_table("bridge_flows")
+        row = conn.execute(
+            f"SELECT * FROM {table} WHERE flow_key = ?", (flow_key,)
+        ).fetchone()
+        if row is None:
+            return f"Flow not found: {flow_key}"
+        cols = [c[1] for c in conn.execute(f"PRAGMA table_info({table})")]
+        return json.dumps(_row_to_dict(row, table, cols), indent=2, default=str)
+    finally:
+        conn.close()
+
+
+def tool_get_role(role_key):
+    """Return role details from database."""
+    if not role_key:
+        return "Error: role_key is required."
+    conn = _get_db_connection()
+    try:
+        table = _safe_table("bridge_roles")
+        cols = [c[1] for c in conn.execute(f"PRAGMA table_info({table})")]
+        safe_cols = _safe_columns(table, cols)
+        col_str = ", ".join(safe_cols)
+        row = conn.execute(
+            f"SELECT {col_str} FROM {table} WHERE role_key = ?", (role_key,)
+        ).fetchone()
+        if row is None:
+            return f"Role not found: {role_key}"
+        return json.dumps(_row_to_dict(row, table, safe_cols), indent=2, default=str)
+    finally:
+        conn.close()
+
+
+def tool_get_flow_steps(flow_key):
+    """Return steps for a flow from database."""
+    if not flow_key:
+        return "Error: flow_key is required."
+    conn = _get_db_connection()
+    try:
+        table = _safe_table("bridge_flow_steps")
+        rows = conn.execute(
+            f"SELECT step_key, from_role, to_role, deliverable_dir, "
+            f"deliverable_pattern, rule_key, sort_order, is_active "
+            f"FROM {table} WHERE flow_key = ? ORDER BY sort_order",
+            (flow_key,),
+        ).fetchall()
+        if not rows:
+            return f"No steps found for flow: {flow_key}"
+        return json.dumps([dict(r) for r in rows], indent=2, default=str)
+    finally:
+        conn.close()
+
+
+def tool_get_panel_subgroups_dynamic():
+    """Return panel subgroups from database (replaces Phase 1 static list)."""
+    conn = _get_db_connection()
+    try:
+        table = _safe_table("panel_subgroups")
+        rows = conn.execute(
+            f"SELECT * FROM {table} ORDER BY group_name, sort_order"
+        ).fetchall()
+        if not rows:
+            return "No panel subgroups found."
+        return json.dumps([dict(r) for r in rows], indent=2, default=str)
+    finally:
+        conn.close()
+
+
+def tool_get_panel_mappings():
+    """Return panel subgroup mappings from database."""
+    conn = _get_db_connection()
+    try:
+        table = _safe_table("panel_subgroup_mappings")
+        rows = conn.execute(
+            f"SELECT * FROM {table} ORDER BY subgroup_key, slot_key"
+        ).fetchall()
+        if not rows:
+            return "No panel mappings found."
+        return json.dumps([dict(r) for r in rows], indent=2, default=str)
+    finally:
+        conn.close()
+
+
 # ── Tool registry ──────────────────────────────────────────────
 
 TOOLS = {
@@ -333,6 +479,27 @@ TOOLS = {
     "search_verdicts": {
         "description": "Search for a query in verdict files",
         "handler": tool_search_verdicts,
+    },
+    # Phase 3 — Database tools
+    "get_flow": {
+        "description": "Return flow details from database (Phase 3)",
+        "handler": tool_get_flow,
+    },
+    "get_role": {
+        "description": "Return role details from database (Phase 3)",
+        "handler": tool_get_role,
+    },
+    "get_flow_steps": {
+        "description": "Return steps for a flow from database (Phase 3)",
+        "handler": tool_get_flow_steps,
+    },
+    "get_panel_subgroups_dynamic": {
+        "description": "Return panel subgroups from database (Phase 3)",
+        "handler": tool_get_panel_subgroups_dynamic,
+    },
+    "get_panel_mappings": {
+        "description": "Return panel subgroup mappings from database (Phase 3)",
+        "handler": tool_get_panel_mappings,
     },
 }
 
@@ -380,8 +547,8 @@ class MCPHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({
                 "status": "ok",
                 "server": "mcp-light",
-                "version": "1.0.0",
-                "phase": 1,
+                "version": "1.3.0",
+                "phase": 3,
             }).encode("utf-8"))
         else:
             self.send_error(404)
@@ -417,6 +584,10 @@ def _handle_call_tool(params):
             result = handler(arguments.get("query", ""))
         elif tool_name == "get_governance_file":
             result = handler(arguments.get("name", ""))
+        elif tool_name in ("get_flow", "get_flow_steps"):
+            result = handler(arguments.get("flow_key", ""))
+        elif tool_name == "get_role":
+            result = handler(arguments.get("role_key", ""))
         else:
             result = handler()
 
