@@ -49,6 +49,20 @@ Available tools: 18
 
 `Ctrl+C` i terminalen.
 
+### Autostart ved reboot (systemd)
+
+```bash
+sudo cp mcp-light.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable mcp-light
+sudo systemctl start mcp-light
+```
+
+Tjek status:
+```bash
+systemctl status mcp-light
+```
+
 ### Health check
 
 ```bash

@@ -1,0 +1,14 @@
+[Unit]
+Description=mcp-light — Local read-only MCP context server for DPMtF
+After=network.target
+
+[Service]
+Type=simple
+User=svend
+WorkingDirectory=/home/svend/mcp-light
+ExecStart=/usr/bin/python3 /home/svend/mcp-light/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
