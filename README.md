@@ -65,7 +65,7 @@ curl http://127.0.0.1:9135/health
 
 ### Claude Code
 
-Tilføj i `~/.claude/settings.json`:
+Opret `~/.mcp.json`:
 
 ```json
 {
@@ -78,7 +78,10 @@ Tilføj i `~/.claude/settings.json`:
 }
 ```
 
-Genstart Claude Code efter tilføjelse.
+Eller brug CLI:
+```bash
+claude mcp add mcp-light --type http --url http://127.0.0.1:9135/mcp
+```
 
 ### OpenCode
 
