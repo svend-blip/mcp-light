@@ -437,6 +437,202 @@ def tool_get_panel_mappings():
         conn.close()
 
 
+# ── Review helpers (Phase 4) ───────────────────────────────────
+
+
+def tool_validate_frontend_impact(report_text):
+    """Check if a text contains a valid Frontend Impact section.
+
+    Returns pass/fail with details about what's missing.
+    """
+    if not report_text:
+        return json.dumps({
+            "status": "fail",
+            "reason": "Empty report text — cannot validate.",
+            "missing": ["Frontend Impact section"],
+        }, indent=2)
+
+    text_lower = report_text.lower()
+
+    # Check for Frontend Impact heading
+    has_heading = "frontend impact" in text_lower
+    has_no_impact = "no frontend impact" in text_lower
+
+    if not has_heading and not has_no_impact:
+        return json.dumps({
+            "status": "fail",
+            "reason": "Missing Frontend Impact section.",
+            "required": "Add '## Frontend Impact' with impact details or 'No frontend impact' with reason.",
+        }, indent=2)
+
+    # "No frontend impact" must have a reason
+    if has_no_impact and not has_heading:
+        # Find the line after "No frontend impact"
+        lines = report_text.split("\n")
+        has_reason = False
+        for i, line in enumerate(lines):
+            if "no frontend impact" in line.lower():
+                # Check next few lines for "Reason:" or non-empty content
+                for j in range(i + 1, min(i + 5, len(lines))):
+                    if lines[j].strip().lower().startswith("reason"):
+                        has_reason = True
+                        break
+                    if lines[j].strip() and not lines[j].strip().startswith("#"):
+                        has_reason = True
+                        break
+                break
+        if not has_reason:
+            return json.dumps({
+                "status": "fail",
+                "reason": "'No frontend impact' declared but no reason given.",
+                "required": "Add 'Reason: <why frontend is not affected>' after 'No frontend impact'.",
+            }, indent=2)
+        return json.dumps({
+            "status": "pass",
+            "reason": "No frontend impact — reason provided.",
+        }, indent=2)
+
+    # Full Frontend Impact section — check required fields
+    required_fields = [
+        "frontend impact",
+        "index.html impact",
+        "panel group",
+        "existing panel",
+        "new panel",
+        "frontend verification",
+    ]
+    missing = [f for f in required_fields if f not in text_lower]
+
+    if missing:
+        return json.dumps({
+            "status": "fail",
+            "reason": f"Missing required fields: {', '.join(missing)}",
+            "required_format": FRONTEND_IMPACT_BLOCK,
+        }, indent=2)
+
+    return json.dumps({
+        "status": "pass",
+        "reason": "All required Frontend Impact fields present.",
+    }, indent=2)
+
+
+def tool_find_reusable_panel(feature_name):
+    """Suggest an existing panel that could be reused for a feature.
+
+    Searches index.html for panels with similar names or purposes.
+    """
+    if not feature_name:
+        return "Error: feature_name is required."
+
+    index_path = "/home/svend/DPMtF-WebUI/templates/index.html"
+    if not _is_allowed_path(index_path):
+        return "Error: index.html not accessible."
+
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return f"Error reading index.html: {e}"
+
+    # Extract all panels with their sections
+    panels = []
+    for match in re.finditer(
+        r'<section[^>]*id="([^"]*)"[^>]*>.*?<h[23][^>]*data-slot="([^"]*)"[^>]*>([^<]*)</h[23]>',
+        content, re.DOTALL
+    ):
+        sec_id, slot, title = match.group(1), match.group(2), match.group(3).strip()
+        panels.append({"id": sec_id, "slot": slot, "title": title})
+
+    # Score panels by relevance to feature_name
+    feature_lower = feature_name.lower()
+    scored = []
+    for p in panels:
+        score = 0
+        title_lower = p["title"].lower()
+        slot_lower = p["slot"].lower()
+        # Direct word match
+        for word in feature_lower.split():
+            if word in title_lower:
+                score += 3
+            if word in slot_lower:
+                score += 2
+            if word in p["id"].lower():
+                score += 1
+        if score > 0:
+            scored.append({**p, "score": score})
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    if not scored:
+        return json.dumps({
+            "suggestion": "No similar panels found. Consider creating a new panel.",
+            "all_panels": [f"{p['id']} — {p['title']}" for p in panels],
+        }, indent=2)
+
+    return json.dumps({
+        "feature": feature_name,
+        "best_match": f"{scored[0]['id']} — {scored[0]['title']} (score={scored[0]['score']})",
+        "candidates": [f"{p['id']} — {p['title']} (score={p['score']})" for p in scored[:5]],
+    }, indent=2)
+
+
+def tool_suggest_panel_location(feature_name):
+    """Suggest which panel group and subgroup a new feature should use.
+
+    Based on the feature name and existing panel structure.
+    """
+    if not feature_name:
+        return "Error: feature_name is required."
+
+    feature_lower = feature_name.lower()
+
+    # Define group characteristics
+    groups = {
+        "daily": ["daily", "today", "current", "now", "active", "session"],
+        "journals": ["journal", "log", "history", "record", "note"],
+        "reports": ["report", "export", "summary", "stats", "analysis"],
+        "periodic": ["phase", "plan", "planning", "periodic", "schedule", "project"],
+        "setup": ["setup", "config", "settings", "admin", "manage", "role", "flow",
+                   "bridge", "convention", "system", "database", "profile", "machine"],
+    }
+
+    # Score each group
+    scores = {}
+    for group, keywords in groups.items():
+        score = sum(1 for kw in keywords if kw in feature_lower)
+        if score > 0:
+            scores[group] = score
+
+    if not scores:
+        best_group = "setup"
+        reason = "No specific keywords matched — defaulting to Setup"
+    else:
+        best_group = max(scores, key=scores.get)
+        reason = f"Matched keywords: {', '.join(k for k in groups[best_group] if k in feature_lower)}"
+
+    # Get existing subgroups for the suggested group
+    conn = _get_db_connection()
+    try:
+        table = _safe_table("panel_subgroups")
+        rows = conn.execute(
+            f"SELECT subgroup_key, title_da, sort_order FROM {table} "
+            f"WHERE group_name = ? AND is_visible = 1 ORDER BY sort_order",
+            (best_group,),
+        ).fetchall()
+        existing = [f"{r['subgroup_key']} — {r['title_da']}" for r in rows]
+    finally:
+        conn.close()
+
+    return json.dumps({
+        "feature": feature_name,
+        "suggested_group": best_group,
+        "reason": reason,
+        "existing_subgroups": existing,
+        "next_sort_order": len(existing) + 1 if existing else 1,
+        "suggested_subgroup_key": f"sg_{best_group}_{feature_name.replace(' ', '_').lower()[:20]}",
+    }, indent=2)
+
+
 # ── Tool registry ──────────────────────────────────────────────
 
 TOOLS = {
@@ -501,6 +697,19 @@ TOOLS = {
         "description": "Return panel subgroup mappings from database (Phase 3)",
         "handler": tool_get_panel_mappings,
     },
+    # Phase 4 — Review helpers
+    "validate_frontend_impact": {
+        "description": "Check if a text contains a valid Frontend Impact section (Phase 4)",
+        "handler": tool_validate_frontend_impact,
+    },
+    "find_reusable_panel": {
+        "description": "Suggest an existing panel that could be reused (Phase 4)",
+        "handler": tool_find_reusable_panel,
+    },
+    "suggest_panel_location": {
+        "description": "Suggest panel group/subgroup for a new feature (Phase 4)",
+        "handler": tool_suggest_panel_location,
+    },
 }
 
 
@@ -547,8 +756,8 @@ class MCPHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({
                 "status": "ok",
                 "server": "mcp-light",
-                "version": "1.3.0",
-                "phase": 3,
+                "version": "1.4.0",
+                "phase": 4,
             }).encode("utf-8"))
         else:
             self.send_error(404)
@@ -588,6 +797,10 @@ def _handle_call_tool(params):
             result = handler(arguments.get("flow_key", ""))
         elif tool_name == "get_role":
             result = handler(arguments.get("role_key", ""))
+        elif tool_name == "validate_frontend_impact":
+            result = handler(arguments.get("report_text", ""))
+        elif tool_name in ("find_reusable_panel", "suggest_panel_location"):
+            result = handler(arguments.get("feature_name", ""))
         else:
             result = handler()
 
