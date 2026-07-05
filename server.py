@@ -4,20 +4,29 @@
 Phase 3: Read-only context + SQLite (fixed queries).
 No write access, no shell execution, no free SQL.
 
-Listens on 127.0.0.1:9135/mcp (HTTP JSON-RPC).
+Listens on 127.0.0.1:9135/mcp (FastMCP streamable-http transport).
 """
 
 import json
 import os
 import re
 import sqlite3
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-# ── Configuration ──────────────────────────────────────────────
+from mcp.server.fastmcp import FastMCP
 
-HOST = "127.0.0.1"
-PORT = 9135
+# mcp-light — read-only MCP context server for DPMtF.
+# Transport: FastMCP streamable-http. The 18 tool_* functions below are the
+# same read-only logic from phases 1-4, now registered with FastMCP.
+# host/port/streamable_http_path are CONSTRUCTOR kwargs (not run() kwargs) in mcp 1.28.1.
+mcp = FastMCP(
+    "mcp-light",
+    host="127.0.0.1",
+    port=9135,
+    streamable_http_path="/mcp",
+)
+
+# ── Configuration ──────────────────────────────────────────────
 
 # Whitelisted directories — only these may be read
 ALLOWED_ROOTS = [
@@ -142,7 +151,8 @@ def _resolve_governance_file(name):
 
 # ── Tool handlers ──────────────────────────────────────────────
 
-def tool_get_frontend_governance():
+@mcp.tool(name="get_frontend_governance", description="Return content from FRONTEND_GOVERNANCE.md")
+def tool_get_frontend_governance() -> str:
     path = _resolve_governance_file("30_FRONTEND_GOVERNANCE.md")
     if path and os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -150,7 +160,8 @@ def tool_get_frontend_governance():
     return "30_FRONTEND_GOVERNANCE.md not found in allowed roots."
 
 
-def tool_get_governance_index():
+@mcp.tool(name="get_governance_index", description="Return list of governance v2 templates and their purpose")
+def tool_get_governance_index() -> str:
     """Return list of governance files with their purpose."""
     index = []
     for root in ALLOWED_ROOTS:
@@ -176,7 +187,8 @@ def tool_get_governance_index():
     return "\n".join(index) if index else "No governance files found."
 
 
-def tool_get_governance_file(name):
+@mcp.tool(name="get_governance_file", description="Return a specific governance template by name (e.g. 11_SCOPE.md)")
+def tool_get_governance_file(name: str) -> str:
     """Return a specific governance file by name."""
     # Security: only allow .md files, no path traversal
     name = os.path.basename(name)
@@ -190,15 +202,18 @@ def tool_get_governance_file(name):
     return f"Governance file not found: {name}"
 
 
-def tool_get_required_frontend_impact_block():
+@mcp.tool(name="get_required_frontend_impact_block", description="Return the standard Frontend Impact block for output")
+def tool_get_required_frontend_impact_block() -> str:
     return FRONTEND_IMPACT_BLOCK + "\n\n" + NO_FRONTEND_IMPACT_BLOCK
 
 
-def tool_get_panel_groups():
+@mcp.tool(name="get_panel_groups", description="Return known panel groups (Daily, Journals, Reports, Periodic, Setup)")
+def tool_get_panel_groups() -> str:
     return "Daily, Journals, Reports, Periodic, Setup"
 
 
-def tool_get_panel_subgroups():
+@mcp.tool(name="get_panel_subgroups", description="Return known panel subgroups with their keys and titles")
+def tool_get_panel_subgroups() -> str:
     """Return panel subgroups from the database (Phase 2) or static list."""
     # Phase 1: return static list from known subgroups
     return (
@@ -218,7 +233,8 @@ def tool_get_panel_subgroups():
     )
 
 
-def tool_get_existing_panels():
+@mcp.tool(name="get_existing_panels", description="Return existing panels with keys, titles, and locations")
+def tool_get_existing_panels() -> str:
     """Return existing panels from index.html structure."""
     index_path = os.path.join(
         ALLOWED_ROOTS[3], "index.html"  # templates dir
@@ -258,7 +274,8 @@ def tool_get_existing_panels():
     return "Existing panels in index.html:\n" + "\n".join(panels) if panels else "No panels found."
 
 
-def tool_get_index_structure():
+@mcp.tool(name="get_index_structure", description="Return a short overview of index.html structure")
+def tool_get_index_structure() -> str:
     """Return a short overview of index.html structure."""
     index_path = "/home/svend/DPMtF-WebUI/templates/index.html"
     if not _is_allowed_path(index_path):
@@ -285,7 +302,8 @@ def tool_get_index_structure():
     return "\n".join(lines)
 
 
-def tool_search_context(query):
+@mcp.tool(name="search_context", description="Search for a query in allowed governance/context files")
+def tool_search_context(query: str) -> str:
     """Search for a query in allowed governance files."""
     if not query or len(query) < 2:
         return "Error: Query must be at least 2 characters."
@@ -315,7 +333,8 @@ def tool_search_context(query):
     return "\n".join(results[:50])  # Max 50 results
 
 
-def tool_search_verdicts(query):
+@mcp.tool(name="search_verdicts", description="Search for a query in verdict files")
+def tool_search_verdicts(query: str) -> str:
     """Search for a query in verdict files."""
     if not query or len(query) < 2:
         return "Error: Query must be at least 2 characters."
@@ -349,7 +368,8 @@ def tool_search_verdicts(query):
 # ── Database tool handlers (Phase 3) ───────────────────────────
 
 
-def tool_get_flow(flow_key):
+@mcp.tool(name="get_flow", description="Return flow details from database (Phase 3)")
+def tool_get_flow(flow_key: str) -> str:
     """Return flow details from database."""
     if not flow_key:
         return "Error: flow_key is required."
@@ -367,7 +387,8 @@ def tool_get_flow(flow_key):
         conn.close()
 
 
-def tool_get_role(role_key):
+@mcp.tool(name="get_role", description="Return role details from database (Phase 3)")
+def tool_get_role(role_key: str) -> str:
     """Return role details from database."""
     if not role_key:
         return "Error: role_key is required."
@@ -387,7 +408,8 @@ def tool_get_role(role_key):
         conn.close()
 
 
-def tool_get_flow_steps(flow_key):
+@mcp.tool(name="get_flow_steps", description="Return steps for a flow from database (Phase 3)")
+def tool_get_flow_steps(flow_key: str) -> str:
     """Return steps for a flow from database."""
     if not flow_key:
         return "Error: flow_key is required."
@@ -407,7 +429,8 @@ def tool_get_flow_steps(flow_key):
         conn.close()
 
 
-def tool_get_panel_subgroups_dynamic():
+@mcp.tool(name="get_panel_subgroups_dynamic", description="Return panel subgroups from database (Phase 3)")
+def tool_get_panel_subgroups_dynamic() -> str:
     """Return panel subgroups from database (replaces Phase 1 static list)."""
     conn = _get_db_connection()
     try:
@@ -422,7 +445,8 @@ def tool_get_panel_subgroups_dynamic():
         conn.close()
 
 
-def tool_get_panel_mappings():
+@mcp.tool(name="get_panel_mappings", description="Return panel subgroup mappings from database (Phase 3)")
+def tool_get_panel_mappings() -> str:
     """Return panel subgroup mappings from database."""
     conn = _get_db_connection()
     try:
@@ -440,7 +464,8 @@ def tool_get_panel_mappings():
 # ── Review helpers (Phase 4) ───────────────────────────────────
 
 
-def tool_validate_frontend_impact(report_text):
+@mcp.tool(name="validate_frontend_impact", description="Check if a text contains a valid Frontend Impact section (Phase 4)")
+def tool_validate_frontend_impact(report_text: str) -> str:
     """Check if a text contains a valid Frontend Impact section.
 
     Returns pass/fail with details about what's missing.
@@ -516,7 +541,8 @@ def tool_validate_frontend_impact(report_text):
     }, indent=2)
 
 
-def tool_find_reusable_panel(feature_name):
+@mcp.tool(name="find_reusable_panel", description="Suggest an existing panel that could be reused (Phase 4)")
+def tool_find_reusable_panel(feature_name: str) -> str:
     """Suggest an existing panel that could be reused for a feature.
 
     Searches index.html for panels with similar names or purposes.
@@ -576,7 +602,8 @@ def tool_find_reusable_panel(feature_name):
     }, indent=2)
 
 
-def tool_suggest_panel_location(feature_name):
+@mcp.tool(name="suggest_panel_location", description="Suggest panel group/subgroup for a new feature (Phase 4)")
+def tool_suggest_panel_location(feature_name: str) -> str:
     """Suggest which panel group and subgroup a new feature should use.
 
     Based on the feature name and existing panel structure.
@@ -633,204 +660,7 @@ def tool_suggest_panel_location(feature_name):
     }, indent=2)
 
 
-# ── Tool registry ──────────────────────────────────────────────
-
-TOOLS = {
-    "get_frontend_governance": {
-        "description": "Return content from FRONTEND_GOVERNANCE.md",
-        "handler": tool_get_frontend_governance,
-    },
-    "get_governance_index": {
-        "description": "Return list of governance v2 templates and their purpose",
-        "handler": tool_get_governance_index,
-    },
-    "get_governance_file": {
-        "description": "Return a specific governance template by name (e.g. 11_SCOPE.md)",
-        "handler": tool_get_governance_file,
-    },
-    "get_required_frontend_impact_block": {
-        "description": "Return the standard Frontend Impact block for output",
-        "handler": tool_get_required_frontend_impact_block,
-    },
-    "get_panel_groups": {
-        "description": "Return known panel groups (Daily, Journals, Reports, Periodic, Setup)",
-        "handler": tool_get_panel_groups,
-    },
-    "get_panel_subgroups": {
-        "description": "Return known panel subgroups with their keys and titles",
-        "handler": tool_get_panel_subgroups,
-    },
-    "get_existing_panels": {
-        "description": "Return existing panels with keys, titles, and locations",
-        "handler": tool_get_existing_panels,
-    },
-    "get_index_structure": {
-        "description": "Return a short overview of index.html structure",
-        "handler": tool_get_index_structure,
-    },
-    "search_context": {
-        "description": "Search for a query in allowed governance/context files",
-        "handler": tool_search_context,
-    },
-    "search_verdicts": {
-        "description": "Search for a query in verdict files",
-        "handler": tool_search_verdicts,
-    },
-    # Phase 3 — Database tools
-    "get_flow": {
-        "description": "Return flow details from database (Phase 3)",
-        "handler": tool_get_flow,
-    },
-    "get_role": {
-        "description": "Return role details from database (Phase 3)",
-        "handler": tool_get_role,
-    },
-    "get_flow_steps": {
-        "description": "Return steps for a flow from database (Phase 3)",
-        "handler": tool_get_flow_steps,
-    },
-    "get_panel_subgroups_dynamic": {
-        "description": "Return panel subgroups from database (Phase 3)",
-        "handler": tool_get_panel_subgroups_dynamic,
-    },
-    "get_panel_mappings": {
-        "description": "Return panel subgroup mappings from database (Phase 3)",
-        "handler": tool_get_panel_mappings,
-    },
-    # Phase 4 — Review helpers
-    "validate_frontend_impact": {
-        "description": "Check if a text contains a valid Frontend Impact section (Phase 4)",
-        "handler": tool_validate_frontend_impact,
-    },
-    "find_reusable_panel": {
-        "description": "Suggest an existing panel that could be reused (Phase 4)",
-        "handler": tool_find_reusable_panel,
-    },
-    "suggest_panel_location": {
-        "description": "Suggest panel group/subgroup for a new feature (Phase 4)",
-        "handler": tool_suggest_panel_location,
-    },
-}
-
-
-# ── MCP JSON-RPC handler ───────────────────────────────────────
-
-class MCPHandler(BaseHTTPRequestHandler):
-    """HTTP handler for MCP JSON-RPC requests."""
-
-    def do_POST(self):
-        if self.path != "/mcp":
-            self.send_error(404)
-            return
-
-        try:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-            request = json.loads(body)
-        except Exception:
-            self.send_error(400, "Invalid JSON")
-            return
-
-        method = request.get("method", "")
-        req_id = request.get("id")
-
-        if method == "tools/list":
-            result = _handle_list_tools()
-        elif method == "tools/call":
-            result = _handle_call_tool(request.get("params", {}))
-        else:
-            result = {"error": f"Unknown method: {method}"}
-
-        response = {"jsonrpc": "2.0", "id": req_id, "result": result}
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(response).encode("utf-8"))
-
-    def do_GET(self):
-        """Health check endpoint."""
-        if self.path == "/health":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "status": "ok",
-                "server": "mcp-light",
-                "version": "1.4.0",
-                "phase": 4,
-            }).encode("utf-8"))
-        else:
-            self.send_error(404)
-
-    def log_message(self, format, *args):
-        """Suppress default logging to stderr."""
-        pass
-
-
-def _handle_list_tools():
-    """Return list of available tools."""
-    tools_list = []
-    for name, info in TOOLS.items():
-        tools_list.append({
-            "name": name,
-            "description": info["description"],
-        })
-    return {"tools": tools_list}
-
-
-def _handle_call_tool(params):
-    """Call a tool by name with arguments."""
-    tool_name = params.get("name", "")
-    arguments = params.get("arguments", {})
-
-    if tool_name not in TOOLS:
-        return {"error": f"Unknown tool: {tool_name}"}
-
-    try:
-        handler = TOOLS[tool_name]["handler"]
-        # Pass query argument for search tools
-        if tool_name in ("search_context", "search_verdicts"):
-            result = handler(arguments.get("query", ""))
-        elif tool_name == "get_governance_file":
-            result = handler(arguments.get("name", ""))
-        elif tool_name in ("get_flow", "get_flow_steps"):
-            result = handler(arguments.get("flow_key", ""))
-        elif tool_name == "get_role":
-            result = handler(arguments.get("role_key", ""))
-        elif tool_name == "validate_frontend_impact":
-            result = handler(arguments.get("report_text", ""))
-        elif tool_name in ("find_reusable_panel", "suggest_panel_location"):
-            result = handler(arguments.get("feature_name", ""))
-        else:
-            result = handler()
-
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": str(result),
-                }
-            ]
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
 # ── Main ───────────────────────────────────────────────────────
 
-def main():
-    server = HTTPServer((HOST, PORT), MCPHandler)
-    print(f"mcp-light v1.0.0 — Phase 1 (read-only context)")
-    print(f"Listening on http://{HOST}:{PORT}/mcp")
-    print(f"Health check: http://{HOST}:{PORT}/health")
-    print(f"Allowed roots: {len(ALLOWED_ROOTS)}")
-    print(f"Available tools: {len(TOOLS)}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down.")
-        server.shutdown()
-
-
 if __name__ == "__main__":
-    main()
+    mcp.run(transport="streamable-http")

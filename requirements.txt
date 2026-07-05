@@ -1,2 +1,2 @@
-# mcp-light — Phase 1: No external dependencies
-# Uses only Python standard library (http.server, json, os, re, pathlib)
+# mcp-light — MCP HTTP transport via official Python SDK
+mcp[cli]==1.28.1
