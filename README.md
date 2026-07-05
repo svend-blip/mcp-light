@@ -1,13 +1,13 @@
 # mcp-light
 
-Lokal read-only MCP context-server til DPMtF.
+Local read-only MCP context server for DPMtF.
 
-Giver Claude Code og OpenCode adgang til governance, panelstruktur og
-projektcontext — uden at være bundet til ét bestemt agent-værktøj.
+Provides Claude Code and OpenCode with access to governance, panel structure,
+and project context — without being tied to a specific agent tool.
 
 ---
 
-## Arkitektur
+## Architecture
 
 ```
 Claude Code ─┐
@@ -23,11 +23,11 @@ OpenCode  ───┘
 
 ## Installation
 
-### Krav
+### Requirements
 
 - Python 3.8+
-- Ingen eksterne dependencies (kun standardbibliotek)
-- Adgang til DPMtF-WebUI's filsystem (samme maskine)
+- No external dependencies (standard library only)
+- Access to DPMtF-WebUI's filesystem (same machine)
 
 ### Start
 
@@ -47,9 +47,9 @@ Available tools: 18
 
 ### Stop
 
-`Ctrl+C` i terminalen.
+`Ctrl+C` in the terminal.
 
-### Autostart ved reboot (systemd)
+### Autostart on reboot (systemd)
 
 ```bash
 sudo cp mcp-light.service /etc/systemd/system/
@@ -58,7 +58,7 @@ sudo systemctl enable mcp-light
 sudo systemctl start mcp-light
 ```
 
-Tjek status:
+Check status:
 ```bash
 systemctl status mcp-light
 ```
@@ -75,92 +75,79 @@ curl http://127.0.0.1:9135/health
 
 ---
 
-## Klientkonfiguration
+## Client Configuration
 
 ### Claude Code
 
-Opret `~/.mcp.json`:
+Claude Code bruger `~/.claude/settings.json` eller `settings.local.json`.
+
+### OpenCode (opencode ≥ 1.17)
+
+Tilføj under `"mcp"` i rollens `opencode.json`:
 
 ```json
 {
-  "mcpServers": {
+  "mcp": {
     "mcp-light": {
-      "type": "http",
-      "url": "http://127.0.0.1:9135/mcp"
+      "type": "remote",
+      "url": "http://127.0.0.1:9135/mcp",
+      "enabled": true
     }
   }
 }
 ```
 
-Eller brug CLI:
-```bash
-claude mcp add mcp-light --type http --url http://127.0.0.1:9135/mcp
-```
+Placering: `~/.config/opencode-roles/\<rolle\>/opencode.json`
 
-### OpenCode
-
-Tilføj i rollens `opencode.json` under `mcpServers`:
-
-```json
-{
-  "mcpServers": {
-    "mcp-light": {
-      "url": "http://127.0.0.1:9135/mcp"
-    }
-  }
-}
-```
-
-Eksempel for `imple01`:
-`~/.config/opencode-roles/imple01/opencode.json`
+**Vigtigt:** Brug `"mcp"` — ikke `"mcpServers"`. Ældre opencode-skemaer understøttede `mcpServers`, men opencode ≥ 1.17 kræver `"mcp"` med `"type": "remote"` for HTTP/SSE-servers.
 
 ---
 
-## Tilgængelige tools (18)
+## Available Tools (18)
 
-### Fase 1 — Context retrieval
+### Phase 1 — Context retrieval
 
-| Tool | Argument | Returnerer |
-|------|----------|-----------|
+| Tool | Argument | Returns |
+|------|----------|---------|
 | `get_frontend_governance` | — | `30_FRONTEND_GOVERNANCE.md` |
-| `get_governance_index` | — | Liste over alle governance templates med titler |
-| `get_governance_file` | `name` (f.eks. `11_SCOPE.md`) | Indhold af en specifik template |
-| `get_required_frontend_impact_block` | — | Standard Frontend Impact blok til output |
-| `search_context` | `query` | Søgeresultater i governance/context filer |
-| `search_verdicts` | `query` | Søgeresultater i verdict filer |
+| `get_governance_index` | — | List of all governance templates with titles |
+| `get_governance_file` | `name` (e.g. `11_SCOPE.md`) | Content of a specific template |
+| `get_required_frontend_impact_block` | — | Standard Frontend Impact block for output |
+| `search_context` | `query` | Search results in governance/context files |
+| `search_verdicts` | `query` | Search results in verdict files |
 
-### Fase 2 — Frontend context
+### Phase 2 — Frontend context
 
-| Tool | Argument | Returnerer |
-|------|----------|-----------|
-| `get_panel_groups` | — | Panelgrupper: Daily, Journals, Reports, Periodic, Setup |
-| `get_panel_subgroups` | — | Kendte subgrupper med nøgler og titler |
-| `get_existing_panels` | — | Eksisterende paneler fra `index.html` |
-| `get_index_structure` | — | Oversigt over `index.html` struktur |
+| Tool | Argument | Returns |
+|------|----------|---------|
+| `get_panel_groups` | — | Panel groups: Daily, Journals, Reports, Periodic, Setup |
+| `get_panel_subgroups` | — | Known subgroups with keys and titles |
+| `get_existing_panels` | — | Existing panels from `index.html` |
+| `get_index_structure` | — | Overview of `index.html` structure |
 
-### Fase 3 — Database (read-only SQLite)
+### Phase 3 — Database (read-only SQLite)
 
-| Tool | Argument | Returnerer |
-|------|----------|-----------|
-| `get_flow` | `flow_key` | Flow detaljer fra `bridge_flows` |
-| `get_role` | `role_key` | Rolle detaljer fra `bridge_roles` (kun whitelistede kolonner) |
-| `get_flow_steps` | `flow_key` | Steps for et flow fra `bridge_flow_steps` |
-| `get_panel_subgroups_dynamic` | — | Subgrupper live fra `panel_subgroups` |
-| `get_panel_mappings` | — | Slot→subgroup mappings fra `panel_subgroup_mappings` |
+| Tool | Argument | Returns |
+|------|----------|---------|
+| `get_flow` | `flow_key` | Flow details from `bridge_flows` |
+| `get_role` | `role_key` | Role details from `bridge_roles` (whitelisted columns only) |
+| `get_flow_steps` | `flow_key` | Steps for a flow from `bridge_flow_steps` |
+| `get_panel_subgroups_dynamic` | — | Subgroups live from `panel_subgroups` |
+| `get_panel_mappings` | — | Slot→subgroup mappings from `panel_subgroup_mappings` |
 
-### Fase 4 — Review helpers
+### Phase 4 — Review helpers
 
-| Tool | Argument | Returnerer |
-|------|----------|-----------|
-| `validate_frontend_impact` | `report_text` | `pass`/`fail` med detaljer om hvad der mangler |
-| `find_reusable_panel` | `feature_name` | Forslag til eksisterende panel der kan genbruges |
-| `suggest_panel_location` | `feature_name` | Forslag til panelgruppe, subgroup og nøgle |
+| Tool | Argument | Returns |
+|------|----------|---------|
+| `validate_frontend_impact` | `report_text` | `pass`/`fail` with details on what's missing |
+| `find_reusable_panel` | `feature_name` | Suggestion for existing panel to reuse |
+| `suggest_panel_location` | `feature_name` | Suggestion for panel group, subgroup, and key |
 
 ---
 
-## Eksempler
+## Examples
 
-### Valider Frontend Impact
+### Validate Frontend Impact
 
 Request:
 ```json
@@ -183,7 +170,7 @@ Response:
 }
 ```
 
-### Find genbrugeligt panel
+### Find reusable panel
 
 Request:
 ```json
@@ -211,7 +198,7 @@ Response:
 }
 ```
 
-### Foreslå panelplacering
+### Suggest panel location
 
 Request:
 ```json
@@ -232,7 +219,7 @@ Response:
   "feature": "Machine Profile",
   "suggested_group": "setup",
   "reason": "Matched keywords: profile, machine",
-  "existing_subgroups": ["sg_setup_flows — Flows", "sg_setup_system — Systemopsætning"],
+  "existing_subgroups": ["sg_setup_flows — Flows", "sg_setup_system — System Setup"],
   "next_sort_order": 8,
   "suggested_subgroup_key": "sg_setup_machine_profile"
 }
@@ -240,28 +227,28 @@ Response:
 
 ---
 
-## Sikkerhed
+## Security
 
-| Regel | Implementering |
-|-------|---------------|
-| Kun whitelistede mapper | `ALLOWED_ROOTS` — 6 stier |
-| Kun whitelistede tabeller | `ALLOWED_TABLES` — 5 tabeller |
-| Kun whitelistede kolonner | `ALLOWED_COLUMNS` — per tabel |
-| Read-only database | `mode=ro` i SQLite URI |
-| Ingen `shell=True` | Alle subprocess-kald bruger liste-argumenter |
-| Ingen skriveadgang | Kun `SELECT`, ingen `INSERT`/`UPDATE`/`DELETE` |
-| Ingen path traversal | `os.path.realpath()` + prefix-check |
-| Ingen fri SQL | Kun hardcodede parameteriserede queries med `?` |
-| Kun `.md` filer | `os.path.basename()` + endelse-check |
-| Kun localhost | `127.0.0.1` — aldrig `0.0.0.0` |
+| Rule | Implementation |
+|------|---------------|
+| Whitelisted directories only | `ALLOWED_ROOTS` — 6 paths |
+| Whitelisted tables only | `ALLOWED_TABLES` — 5 tables |
+| Whitelisted columns only | `ALLOWED_COLUMNS` — per table |
+| Read-only database | `mode=ro` in SQLite URI |
+| No `shell=True` | All subprocess calls use list arguments |
+| No write access | Only `SELECT`, no `INSERT`/`UPDATE`/`DELETE` |
+| No path traversal | `os.path.realpath()` + prefix check |
+| No free-form SQL | Only hardcoded parameterized queries with `?` |
+| Only `.md` files | `os.path.basename()` + extension check |
+| Localhost only | `127.0.0.1` — never `0.0.0.0` |
 
 ---
 
-## Faseplan
+## Phase Plan
 
-| Fase | Status | Indhold |
+| Phase | Status | Content |
 |------|--------|---------|
-| 1 — Context | ✅ | Read-only fil-adgang, 6 tools |
-| 2 — Frontend | ✅ | Panelstruktur, 4 tools |
+| 1 — Context | ✅ | Read-only file access, 6 tools |
+| 2 — Frontend | ✅ | Panel structure, 4 tools |
 | 3 — Database | ✅ | SQLite read-only, 5 tools |
-| 4 — Review | ✅ | Validering og forslag, 3 tools |
+| 4 — Review | ✅ | Validation and suggestions, 3 tools |
