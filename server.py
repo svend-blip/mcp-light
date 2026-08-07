@@ -19,10 +19,27 @@ from mcp.server.fastmcp import FastMCP
 # Transport: FastMCP streamable-http. The 18 tool_* functions below are the
 # same read-only logic from phases 1-4, now registered with FastMCP.
 # host/port/streamable_http_path are CONSTRUCTOR kwargs (not run() kwargs) in mcp 1.28.1.
+# Bind address from the environment, loopback by default.
+#
+# Loopback was the whole security model: nothing else could reach it, so
+# nothing needed authentication. That still holds for Father's own roles and
+# is why the default has not moved.
+#
+# A LightWorker on another machine cannot reach loopback. Rather than widen
+# this instance -- 0.0.0.0 would also expose it on the wifi LAN and on three
+# docker bridges, which is a surface that is easy to forget -- a SECOND
+# instance is started bound to the Tailscale address. The server is entirely
+# read-only (18 tools, no INSERT/UPDATE/DELETE, no writes), so two instances
+# over one database cannot conflict, and Father's thirteen role configs keep
+# pointing at loopback and are unaffected by anything the worker does.
+#
+# Note what changes for the remote one: there is no authentication, so the
+# tailnet becomes the boundary. Anything on the tailnet can read governance,
+# flows, roles and verdicts.
 mcp = FastMCP(
     "mcp-light",
-    host="127.0.0.1",
-    port=9135,
+    host=os.environ.get("MCP_LIGHT_HOST", "127.0.0.1"),
+    port=int(os.environ.get("MCP_LIGHT_PORT", "9135")),
     streamable_http_path="/mcp",
 )
 

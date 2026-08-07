@@ -1,0 +1,47 @@
+# mcp-light, tailnet instance — remote LightWorkers.
+#
+# A SECOND instance beside the loopback one, bound to this host's Tailscale
+# address so a worker on another machine can reach it. The server is entirely
+# read-only (18 tools, no INSERT/UPDATE/DELETE, no file writes), so two
+# processes over one database cannot conflict, and the loopback instance and
+# every local role config are untouched by anything a worker does.
+#
+# Why not simply widen the loopback instance to 0.0.0.0: that also exposes it
+# on the LAN and on every docker bridge on the host — a surface that is easy
+# to forget. Binding the Tailscale address reaches exactly what needs reaching.
+#
+# WHAT THIS CHANGES: mcp-light has no authentication. Loopback-only was the
+# security model. With this instance running, the tailnet is the boundary, and
+# anything on the tailnet can read governance, flows, roles and verdicts.
+# Do not enable it on a tailnet you do not control.
+#
+# Set MCP_LIGHT_HOST below to this host's own Tailscale address.
+#
+# Install:
+#   cp mcp-light-tailnet.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mcp-light-tailnet
+
+[Unit]
+Description=mcp-light (tailnet) — read-only MCP context server for remote workers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/svend/mcp-light
+Environment=MCP_LIGHT_HOST=100.82.231.128
+ExecStart=/home/svend/mcp-light/venv/bin/python /home/svend/mcp-light/server.py
+
+# Restart=always, not on-failure. At boot this races tailscaled: binding to a
+# Tailscale address fails until the interface exists, and that failure can be
+# a clean exit. Retrying every 10s removes the race without a user unit having
+# to depend on a system unit, which systemd does not make straightforward.
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

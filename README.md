@@ -14,10 +14,17 @@ Claude Code ─┐
              ├── MCP client config
 OpenCode  ───┘
              ↓
-        mcp-light (127.0.0.1:9135)
+        mcp-light (127.0.0.1:9135)          ← local roles
              ↓
   DPMtF governance/context (read-only)
+             ↑
+        mcp-light (<tailscale-ip>:9135)     ← remote LightWorkers
+             ↑
+   OpenCode on another machine, over Tailscale
 ```
+
+Two instances of the same read-only server, one per bind address. See
+[Remote access over Tailscale](#remote-access-over-tailscale).
 
 ---
 
@@ -26,8 +33,12 @@ OpenCode  ───┘
 ### Requirements
 
 - Python 3.8+
-- No external dependencies (standard library only)
-- Access to DPMtF-WebUI's filesystem (same machine)
+- `mcp[cli]` (see `requirements.txt`) — installed in `venv/`
+- Read access to DPMtF-WebUI's filesystem
+
+The server reads the governance and database files directly, so the process
+must run on the machine that holds them. Its *clients* need not: they speak
+HTTP and can be on another host (see below).
 
 ### Start
 
@@ -51,17 +62,23 @@ Available tools: 18
 
 ### Autostart on reboot (systemd)
 
+A **user** unit — no root needed. The server runs as the owning user, reads
+that user's files and binds a high port.
+
 ```bash
-sudo cp mcp-light.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable mcp-light
-sudo systemctl start mcp-light
+cp mcp-light.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now mcp-light
+loginctl enable-linger $USER    # start at boot without logging in
 ```
 
 Check status:
 ```bash
-systemctl status mcp-light
+systemctl --user status mcp-light
 ```
+
+Without `enable-linger` the unit starts on login and stops on logout, which
+on a headless host means it never starts at all.
 
 ### Health check
 
@@ -100,6 +117,91 @@ Tilføj under `"mcp"` i rollens `opencode.json`:
 Placering: `~/.config/opencode-roles/\<rolle\>/opencode.json`
 
 **Vigtigt:** Brug `"mcp"` — ikke `"mcpServers"`. Ældre opencode-skemaer understøttede `mcpServers`, men opencode ≥ 1.17 kræver `"mcp"` med `"type": "remote"` for HTTP/SSE-servers.
+
+---
+
+## Remote access over Tailscale
+
+A client on another machine cannot reach `127.0.0.1`. Since the server is
+entirely read-only — 18 tools, no `INSERT`/`UPDATE`/`DELETE`, no file writes —
+a **second instance** can serve remote clients over Tailscale without
+affecting the local one. Two processes over one database cannot conflict, and
+local role configs keep pointing at loopback.
+
+### Why a second instance rather than a wider bind
+
+Binding the existing instance to `0.0.0.0` would also expose it on the LAN and
+on every docker bridge on the host — a surface that is easy to forget.
+Binding the Tailscale address reaches exactly what needs reaching.
+
+### What it changes
+
+**mcp-light has no authentication.** Loopback-only *was* the security model:
+nothing else could reach it, so nothing needed to authenticate. With a tailnet
+instance running, **the tailnet is the boundary** — anything on it can read
+governance, flows, roles and verdicts. Do not enable this on a tailnet you do
+not control.
+
+### Setup
+
+`MCP_LIGHT_HOST` and `MCP_LIGHT_PORT` override the bind address; both default
+to loopback and 9135, so an existing deployment is unaffected.
+
+```bash
+# on the host that holds the governance files
+tailscale ip -4                       # this host's tailnet address
+$EDITOR mcp-light-tailnet.service     # set MCP_LIGHT_HOST to it
+cp mcp-light-tailnet.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now mcp-light-tailnet
+```
+
+Both instances then listen side by side:
+
+```bash
+$ ss -ltn | grep 9135
+LISTEN  0  2048  100.82.231.128:9135  0.0.0.0:*     # remote clients
+LISTEN  0  2048       127.0.0.1:9135  0.0.0.0:*     # local roles
+```
+
+The unit uses `Restart=always` rather than `on-failure`: at boot it races
+`tailscaled`, and binding a Tailscale address fails until the interface
+exists. Retrying every 10s removes the race without a user unit having to
+depend on a system unit.
+
+### Client configuration
+
+Identical to the local case with the address swapped:
+
+```json
+{
+  "mcp": {
+    "mcp-light": {
+      "type": "remote",
+      "url": "http://100.82.231.128:9135/mcp",
+      "enabled": true,
+      "timeout": 10000
+    }
+  }
+}
+```
+
+### Verify from the client machine
+
+`/health` answers on GET; the MCP endpoint itself needs a POST and the
+streamable-http `Accept` header, which is worth knowing before concluding the
+server is down:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -X POST http://100.82.231.128:9135/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+       "protocolVersion":"2024-11-05","capabilities":{},
+       "clientInfo":{"name":"probe","version":"1"}}}'
+# 200
+```
 
 ---
 
@@ -240,7 +342,23 @@ Response:
 | No path traversal | `os.path.realpath()` + prefix check |
 | No free-form SQL | Only hardcoded parameterized queries with `?` |
 | Only `.md` files | `os.path.basename()` + extension check |
-| Localhost only | `127.0.0.1` — never `0.0.0.0` |
+| Never `0.0.0.0` | Bind address is explicit; the default is `127.0.0.1` |
+
+### There is no authentication
+
+Every rule above limits *what* a connected client can read. None of them
+limits *who* may connect. Loopback-only was the answer to that: nothing off
+the machine could reach the port, so nothing needed to authenticate.
+
+Running the tailnet instance moves that boundary to the tailnet. Anything on
+it — every device, and anything running on those devices — can read the
+governance, flows, roles and verdicts this server exposes. That is a
+deliberate trade for letting remote workers look context up themselves, and
+it is only sound on a tailnet you control.
+
+If that is not acceptable for a given deployment, do not install
+`mcp-light-tailnet.service`. Nothing else depends on it, and the loopback
+instance is unaffected.
 
 ---
 

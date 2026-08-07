@@ -1,14 +1,38 @@
+# mcp-light, loopback instance — Father's own roles.
+#
+# A USER unit, installed to ~/.config/systemd/user/. It needs no root: the
+# server runs as the owning user, reads that user's files, and binds a high
+# port. An earlier version of this file was a system unit with User=svend and
+# WantedBy=multi-user.target, which required sudo for no benefit.
+#
+# Install:
+#   cp mcp-light.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mcp-light
+#   loginctl enable-linger $USER      # start at boot without logging in
+
 [Unit]
-Description=mcp-light — Local read-only MCP context server for DPMtF
+Description=mcp-light (loopback) — read-only MCP context server
 After=network.target
 
 [Service]
 Type=simple
-User=svend
 WorkingDirectory=/home/svend/mcp-light
-ExecStart=/usr/bin/python3 /home/svend/mcp-light/server.py
-Restart=on-failure
+# The venv, NOT /usr/bin/python3. FastMCP is installed in the venv and the
+# system interpreter cannot import it, so a unit naming python3 fails at
+# start. This file said python3 until 2026-08-07, which is why it had never
+# been installed and the server had been running as a hand-started process.
+#
+# No MCP_LIGHT_HOST: the default is loopback, which is this instance's entire
+# security model. Nothing off this machine can reach it, so nothing needs to
+# authenticate. Local role configs point at http://127.0.0.1:9135/mcp.
+ExecStart=/home/svend/mcp-light/venv/bin/python /home/svend/mcp-light/server.py
+
+Restart=always
 RestartSec=5
 
+NoNewPrivileges=yes
+PrivateTmp=yes
+
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
