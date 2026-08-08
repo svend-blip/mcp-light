@@ -90,7 +90,7 @@ mcp-light v1.4.0 — Phase 4 (read-only context + SQLite + review helpers)
 Listening on http://127.0.0.1:9135/mcp
 Health check: http://127.0.0.1:9135/health
 Allowed roots: 6
-Available tools: 18
+Available tools: 22
 ```
 
 ### Stop
@@ -160,7 +160,7 @@ Placering: `~/.config/opencode-roles/\<rolle\>/opencode.json`
 ## Remote access over Tailscale
 
 A client on another machine cannot reach `127.0.0.1`. Since the server is
-entirely read-only — 18 tools, no `INSERT`/`UPDATE`/`DELETE`, no file writes —
+entirely read-only — 22 tools, no `INSERT`/`UPDATE`/`DELETE`, no file writes —
 a **second instance** can serve remote clients over Tailscale without
 affecting the local one. Two processes over one database cannot conflict, and
 local role configs keep pointing at loopback.
@@ -242,7 +242,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 ---
 
-## Available Tools (18)
+## Available Tools (22)
 
 ### Phase 1 — Context retrieval
 
@@ -278,9 +278,18 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 | Tool | Argument | Returns |
 |------|----------|---------|
-| `validate_frontend_impact` | `report_text` | `pass`/`fail` with details on what's missing |
+| `validate_frontend_impact` | `report_text` | `pass`/`fail` with details on what's missing; reports declaring new labels must also declare label-reuse check + the 4 locales |
 | `find_reusable_panel` | `feature_name` | Suggestion for existing panel to reuse |
 | `suggest_panel_location` | `feature_name` | Suggestion for panel group, subgroup, and key |
+
+### Phase 5 — Coding-standard enforcement (2026-08-08)
+
+| Tool | Argument | Returns |
+|------|----------|---------|
+| `validate_i18n_completeness` | `project` (`dpmtf`/`model-allocator`) | Labels missing any of the 4 mandatory locales (`en-US`, `da-DK`, `de-DE`, `es-ES`) with per-locale coverage |
+| `validate_frontend_code` | `code_text`, `filename?` | Mechanical scan for 12_CODING_STANDARD auto-fail patterns (innerHTML, var, inline style, hardcoded paths); warnings for suspected un-`lbl()`ed text |
+| `find_reusable_label` | `text`, `description?`, `project?` | The FIND half of find-or-create: `reuse` (existing identical label + slot-mapping SQL) or `create` (4-locale SQL template). Call BEFORE creating any label |
+| `find_duplicate_labels` | `project?` | Label groups with identical text+description that should be merged (keep one, repoint slots, deactivate the rest) |
 
 ---
 

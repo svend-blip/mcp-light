@@ -82,6 +82,9 @@ FRONTEND_IMPACT_BLOCK = """## Frontend Impact
 - Panel group/subgroup: <which group, which subgroup>
 - Existing panel reused: <yes/no, which>
 - New panel needed: <yes/no, why>
+- New labels: <label_key list, or 'none'>
+- Label reuse checked: <result of find_reusable_label, or 'n/a'>
+- Locales seeded: <en-US, da-DK, de-DE, es-ES for every new label, or 'n/a'>
 - Frontend verification: <how to verify the change>"""
 
 NO_FRONTEND_IMPACT_BLOCK = """## Frontend Impact
@@ -552,6 +555,30 @@ def tool_validate_frontend_impact(report_text: str) -> str:
             "required_format": FRONTEND_IMPACT_BLOCK,
         }, indent=2)
 
+    # i18n declaration (2026-08-08): a report that declares NEW labels must
+    # also declare the label-reuse check and the four mandatory locales.
+    # Reports declaring 'New labels: none' (or predating the field) pass.
+    new_labels_match = re.search(r"new labels?\s*:\s*(.+)", text_lower)
+    if new_labels_match:
+        declared = new_labels_match.group(1).strip()
+        declares_new = declared and not declared.startswith(
+            ("none", "n/a", "no ", "-"))
+        if declares_new:
+            i18n_missing = []
+            if "label reuse" not in text_lower:
+                i18n_missing.append(
+                    "Label reuse checked (run find_reusable_label first)")
+            if "locales seeded" not in text_lower:
+                i18n_missing.append(
+                    "Locales seeded (en-US, da-DK, de-DE, es-ES)")
+            if i18n_missing:
+                return json.dumps({
+                    "status": "fail",
+                    "reason": "New labels declared without i18n evidence: "
+                              + "; ".join(i18n_missing),
+                    "required_format": FRONTEND_IMPACT_BLOCK,
+                }, indent=2)
+
     return json.dumps({
         "status": "pass",
         "reason": "All required Frontend Impact fields present.",
@@ -674,6 +701,308 @@ def tool_suggest_panel_location(feature_name: str) -> str:
         "existing_subgroups": existing,
         "next_sort_order": len(existing) + 1 if existing else 1,
         "suggested_subgroup_key": f"sg_{best_group}_{feature_name.replace(' ', '_').lower()[:20]}",
+    }, indent=2)
+
+
+# ── Coding-standard enforcement (Phase 5, 2026-08-08) ──────────
+
+# The four mandatory locales per 12_CODING_STANDARD.md.
+MANDATORY_LOCALES = ("en-US", "da-DK", "de-DE", "es-ES")
+
+# Known project i18n databases (read-only). Keyed by project name so the
+# tool surface never accepts arbitrary filesystem paths.
+I18N_DBS = {
+    "dpmtf": DB_PATH,
+    "model-allocator": "/home/svend/model-allocator/allocator.db",
+}
+
+
+def _open_i18n_db(project):
+    """Open a whitelisted project's i18n database read-only."""
+    db_path = I18N_DBS.get(project)
+    if not db_path:
+        raise ValueError(
+            f"Unknown project '{project}'. Known: {', '.join(sorted(I18N_DBS))}"
+        )
+    if not os.path.isfile(db_path):
+        raise ValueError(f"Database for '{project}' not found: {db_path}")
+    conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _i18n_schema(conn):
+    """Detect schema variant: Father joins translations on label_id,
+    skeleton-born projects join on label_key. Also note is_active columns."""
+    label_cols = {r[1] for r in conn.execute("PRAGMA table_info(ui_labels)")}
+    trans_cols = {r[1] for r in
+                  conn.execute("PRAGMA table_info(ui_label_translations)")}
+    join_key = "label_id" if ("label_id" in label_cols and
+                              "label_id" in trans_cols) else "label_key"
+    return {
+        "join_key": join_key,
+        "labels_active": "is_active" in label_cols,
+        "trans_active": "is_active" in trans_cols,
+        "has_description": "description" in label_cols,
+    }
+
+
+@mcp.tool(name="validate_i18n_completeness",
+          description="Report labels missing any of the 4 mandatory locales "
+                      "(en-US, da-DK, de-DE, es-ES) in a project's i18n DB (Phase 5)")
+def tool_validate_i18n_completeness(project: str = "dpmtf") -> str:
+    """List every active label that lacks a translation in one or more of
+    the four mandatory locales. The fix is adding translations — never
+    deleting labels (12_CODING_STANDARD.md)."""
+    try:
+        conn = _open_i18n_db(project)
+    except ValueError as e:
+        return json.dumps({"status": "error", "reason": str(e)}, indent=2)
+
+    try:
+        schema = _i18n_schema(conn)
+        jk = schema["join_key"]
+        where_label = "WHERE l.is_active = 1" if schema["labels_active"] else ""
+        and_trans = "AND t.is_active = 1" if schema["trans_active"] else ""
+        rows = conn.execute(
+            f"SELECT l.label_key, "
+            f"GROUP_CONCAT(DISTINCT t.locale) AS locales "
+            f"FROM ui_labels l "
+            f"LEFT JOIN ui_label_translations t "
+            f"ON t.{jk} = l.{jk} {and_trans} "
+            f"{where_label} GROUP BY l.{jk} ORDER BY l.label_key",
+        ).fetchall()
+    except sqlite3.Error as e:
+        conn.close()
+        return json.dumps({"status": "error", "reason": str(e)}, indent=2)
+    finally:
+        if conn:
+            conn.close()
+
+    incomplete = []
+    locale_counts = {loc: 0 for loc in MANDATORY_LOCALES}
+    for r in rows:
+        present = set((r["locales"] or "").split(",")) - {""}
+        for loc in MANDATORY_LOCALES:
+            if loc in present:
+                locale_counts[loc] += 1
+        missing = [loc for loc in MANDATORY_LOCALES if loc not in present]
+        if missing:
+            incomplete.append({"label_key": r["label_key"],
+                               "missing": missing})
+
+    truncated = len(incomplete) > 200
+    return json.dumps({
+        "status": "pass" if not incomplete else "fail",
+        "project": project,
+        "total_labels": len(rows),
+        "labels_incomplete": len(incomplete),
+        "per_locale_coverage": locale_counts,
+        "mandatory_locales": list(MANDATORY_LOCALES),
+        "incomplete": incomplete[:200],
+        "truncated": truncated,
+        "rule": "Every label MUST have all four mandatory locales. "
+                "Fix by ADDING translations, never by deleting labels.",
+    }, indent=2)
+
+
+# Mechanical auto-fail patterns from 12_CODING_STANDARD.md. Each entry:
+# (compiled regex, severity, message). Heuristic text checks are warnings —
+# a human/reviewer judges them; regex cannot read intent.
+_CODE_CHECKS = [
+    (re.compile(r"\.innerHTML\s*="), "auto_fail",
+     "innerHTML assignment — use createElement()/textContent/appendChild()/replaceChildren()"),
+    (re.compile(r"\binsertAdjacentHTML\s*\("), "auto_fail",
+     "insertAdjacentHTML — same risk as innerHTML; build DOM nodes instead"),
+    (re.compile(r"\bdocument\.write\s*\("), "auto_fail",
+     "document.write — prohibited"),
+    (re.compile(r"/home/svend"), "auto_fail",
+     "Hardcoded /home/svend path — use config getters or env vars"),
+    (re.compile(r"\bvar\s+[A-Za-z_$]"), "fail",
+     "var declaration — use const (default) or let"),
+    (re.compile(r"<\w[^>]*\sstyle=\""), "fail",
+     "Inline style attribute — use CSS classes"),
+    (re.compile(r"\.textContent\s*=\s*[\"'][^\"']*[A-Za-z]{3,}[^\"']*[\"']"),
+     "warning",
+     "String literal assigned to textContent — user-facing text MUST go through lbl(key, fallback)"),
+]
+
+
+@mcp.tool(name="validate_frontend_code",
+          description="Mechanically check JS/HTML code text against the "
+                      "12_CODING_STANDARD auto-fail patterns (Phase 5)")
+def tool_validate_frontend_code(code_text: str, filename: str = "") -> str:
+    """Scan code text for the prohibited frontend patterns. Auto-fail and
+    fail findings block; warnings need reviewer judgement. This is a
+    mechanical net under review — passing it does not replace review."""
+    if not code_text:
+        return json.dumps({"status": "error",
+                           "reason": "Empty code_text."}, indent=2)
+
+    findings = []
+    for lineno, line in enumerate(code_text.split("\n"), start=1):
+        stripped = line.strip()
+        if stripped.startswith("//") or stripped.startswith("*") \
+                or stripped.startswith("/*") or stripped.startswith("#"):
+            continue
+        for pattern, severity, message in _CODE_CHECKS:
+            if pattern.search(line):
+                # lbl(...) fallbacks are the sanctioned literal usage.
+                if severity == "warning" and "lbl(" in line:
+                    continue
+                findings.append({"line": lineno, "severity": severity,
+                                 "message": message,
+                                 "code": line.strip()[:160]})
+
+    blocking = [f for f in findings if f["severity"] in ("auto_fail", "fail")]
+    warnings = [f for f in findings if f["severity"] == "warning"]
+    status = ("fail" if blocking
+              else "pass_with_warnings" if warnings else "pass")
+    return json.dumps({
+        "status": status,
+        "filename": filename or None,
+        "blocking": blocking,
+        "warnings": warnings,
+        "note": "Mechanical check only — passing does not replace review. "
+                "Warnings require reviewer judgement (a regex cannot read intent).",
+    }, indent=2)
+
+
+@mcp.tool(name="find_reusable_label",
+          description="findOrCreate for labels: find an existing label with "
+                      "the same text (and description) to map a slot to, or "
+                      "get the create-SQL for all 4 mandatory locales (Phase 5)")
+def tool_find_reusable_label(text: str, description: str = "",
+                             project: str = "dpmtf") -> str:
+    """The FIND half of find-or-create for labels.
+
+    Slot keys are unique, but when several slots need the same text and
+    help text there is no reason for several identical labels — map the
+    new slot to the existing label instead. Call this BEFORE creating any
+    label (12_CODING_STANDARD.md makes that check mandatory)."""
+    if not text or not text.strip():
+        return json.dumps({"status": "error",
+                           "reason": "text is required."}, indent=2)
+    try:
+        conn = _open_i18n_db(project)
+    except ValueError as e:
+        return json.dumps({"status": "error", "reason": str(e)}, indent=2)
+
+    try:
+        schema = _i18n_schema(conn)
+        where_active = "AND l.is_active = 1" if schema["labels_active"] else ""
+        exact = conn.execute(
+            f"SELECT l.label_key, l.default_text, l.description "
+            f"FROM ui_labels l "
+            f"WHERE lower(l.default_text) = lower(?) {where_active}",
+            (text.strip(),),
+        ).fetchall()
+        partial = conn.execute(
+            f"SELECT l.label_key, l.default_text, l.description "
+            f"FROM ui_labels l "
+            f"WHERE l.default_text LIKE ? {where_active} "
+            f"AND lower(l.default_text) != lower(?) LIMIT 10",
+            (f"%{text.strip()}%", text.strip()),
+        ).fetchall()
+    except sqlite3.Error as e:
+        conn.close()
+        return json.dumps({"status": "error", "reason": str(e)}, indent=2)
+    finally:
+        if conn:
+            conn.close()
+
+    def _entry(r):
+        return {"label_key": r["label_key"],
+                "default_text": r["default_text"],
+                "description": r["description"]}
+
+    # An exact match on text+description is a REUSE verdict; text-only
+    # matches are candidates the implementer judges.
+    desc = (description or "").strip().lower()
+    reuse = [
+        _entry(r) for r in exact
+        if not desc or (r["description"] or "").strip().lower() == desc
+    ]
+
+    if reuse:
+        return json.dumps({
+            "status": "reuse",
+            "project": project,
+            "matches": reuse,
+            "action": "Map your slot to the existing label — do NOT create "
+                      "a new one.",
+            "sql": ("INSERT INTO ui_text_slot_labels (slot_key, label_key) "
+                    f"VALUES ('<your_slot_key>', '{reuse[0]['label_key']}');"),
+        }, indent=2)
+
+    return json.dumps({
+        "status": "create",
+        "project": project,
+        "text_only_matches": [_entry(r) for r in exact],
+        "partial_matches": [_entry(r) for r in partial],
+        "action": "No identical label exists — create one, seeding ALL FOUR "
+                  "mandatory locales, then map the slot.",
+        "mandatory_locales": list(MANDATORY_LOCALES),
+        "sql_template": [
+            "INSERT INTO ui_labels (label_key, default_text, description) "
+            "VALUES ('<label_key>', '<default_text>', '<description>');",
+            "-- one row per mandatory locale (en-US, da-DK, de-DE, es-ES):",
+            "INSERT INTO ui_label_translations (label_key, locale, translated_text) "
+            "VALUES ('<label_key>', '<locale>', '<translation>');",
+            "INSERT INTO ui_text_slot_labels (slot_key, label_key) "
+            "VALUES ('<your_slot_key>', '<label_key>');",
+        ],
+        "note": "Father's schema keys translations by label_id, not "
+                "label_key — use scripts/i18n_lib.py find_or_create_label() "
+                "there instead of raw SQL.",
+    }, indent=2)
+
+
+@mcp.tool(name="find_duplicate_labels",
+          description="Report label groups with identical text and help text "
+                      "that should be merged into one label (Phase 5)")
+def tool_find_duplicate_labels(project: str = "dpmtf") -> str:
+    """Find labels that duplicate each other (same default_text and same
+    description). Slots must be unique; identical labels need not be.
+    Merge = keep one, remap the other slots, deactivate the rest."""
+    try:
+        conn = _open_i18n_db(project)
+    except ValueError as e:
+        return json.dumps({"status": "error", "reason": str(e)}, indent=2)
+
+    try:
+        schema = _i18n_schema(conn)
+        where_active = "WHERE l.is_active = 1" if schema["labels_active"] else ""
+        rows = conn.execute(
+            f"SELECT l.default_text, "
+            f"COALESCE(l.description, '') AS description, "
+            f"GROUP_CONCAT(l.label_key) AS keys, COUNT(*) AS n "
+            f"FROM ui_labels l {where_active} "
+            f"GROUP BY lower(l.default_text), "
+            f"lower(COALESCE(l.description, '')) "
+            f"HAVING n > 1 ORDER BY n DESC",
+        ).fetchall()
+    except sqlite3.Error as e:
+        conn.close()
+        return json.dumps({"status": "error", "reason": str(e)}, indent=2)
+    finally:
+        if conn:
+            conn.close()
+
+    groups = [{"default_text": r["default_text"],
+               "description": r["description"],
+               "label_keys": (r["keys"] or "").split(","),
+               "count": r["n"]} for r in rows]
+    return json.dumps({
+        "status": "pass" if not groups else "duplicates_found",
+        "project": project,
+        "duplicate_groups": groups,
+        "merge_procedure": [
+            "1. Pick ONE label to keep (the oldest / most-referenced).",
+            "2. Repoint slots: UPDATE ui_text_slot_labels SET label_key = "
+            "'<kept>' WHERE label_key = '<duplicate>';",
+            "3. Deactivate the duplicate (is_active = 0) — never DELETE.",
+        ],
     }, indent=2)
 
 
