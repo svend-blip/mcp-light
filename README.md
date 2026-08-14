@@ -77,6 +77,12 @@ The server reads the governance and database files directly, so the process
 must run on the machine that holds them. Its *clients* need not: they speak
 HTTP and can be on another host (see below).
 
+It reads TWO databases, both in read-only mode: Father's
+`DPMtF-WebUI/databases/dpmtf.db` (governance, flows, roles, verdicts,
+panels, i18n) and `model-allocator/allocator.db` (the i18n-completeness
+check for the allocator UI). Roots are configurable via `DPMTF_WEBUI_ROOT`,
+`DPMTF_FLOWS_ROOT` and `DPMTF_ALLOCATOR_ROOT`.
+
 ### Start
 
 ```bash
