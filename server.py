@@ -11,12 +11,11 @@ import json
 import os
 import re
 import sqlite3
-from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 # mcp-light — read-only MCP context server for DPMtF.
-# Transport: FastMCP streamable-http. The 18 tool_* functions below are the
+# Transport: FastMCP streamable-http. The 22 tool_* functions below are the
 # same read-only logic from phases 1-4, now registered with FastMCP.
 # host/port/streamable_http_path are CONSTRUCTOR kwargs (not run() kwargs) in mcp 1.28.1.
 # Bind address from the environment, loopback by default.
@@ -29,7 +28,7 @@ from mcp.server.fastmcp import FastMCP
 # this instance -- 0.0.0.0 would also expose it on the wifi LAN and on three
 # docker bridges, which is a surface that is easy to forget -- a SECOND
 # instance is started bound to the Tailscale address. The server is entirely
-# read-only (18 tools, no INSERT/UPDATE/DELETE, no writes), so two instances
+# read-only (22 tools, no INSERT/UPDATE/DELETE, no writes), so two instances
 # over one database cannot conflict, and Father's thirteen role configs keep
 # pointing at loopback and are unaffected by anything the worker does.
 #
@@ -45,35 +44,26 @@ mcp = FastMCP(
 
 # ── Configuration ──────────────────────────────────────────────
 
+# Ecosystem roots. Resolved from the environment so this server carries no
+# hardcoded absolute path (the same rule its own validate_frontend_code
+# enforces on other people's code). The defaults expand against $HOME, which
+# reproduces the historical /home/svend layout without embedding it.
+WEBUI_ROOT = os.environ.get("DPMTF_WEBUI_ROOT", os.path.expanduser("~/DPMtF-WebUI"))
+FLOWS_ROOT = os.environ.get("DPMTF_FLOWS_ROOT", os.path.expanduser("~/flows"))
+ALLOCATOR_ROOT = os.environ.get(
+    "DPMTF_ALLOCATOR_ROOT", os.path.expanduser("~/model-allocator")
+)
+
+INDEX_HTML_PATH = os.path.join(WEBUI_ROOT, "templates", "index.html")
+
 # Whitelisted directories — only these may be read
 ALLOWED_ROOTS = [
-    "/home/svend/DPMtF-WebUI/docs/governance-templates-v2",
-    "/home/svend/DPMtF-WebUI/docs/dpmtf",
-    "/home/svend/DPMtF-WebUI/docs/prompt-runs",
-    "/home/svend/DPMtF-WebUI/templates",
-    "/home/svend/DPMtF-WebUI/static/js",
-    "/home/svend/flows/strict_review/verdicts",
+    os.path.join(WEBUI_ROOT, "docs", "governance-templates-v2"),
+    os.path.join(WEBUI_ROOT, "docs", "prompt-runs"),
+    os.path.join(WEBUI_ROOT, "templates"),
+    os.path.join(WEBUI_ROOT, "static", "js"),
+    os.path.join(FLOWS_ROOT, "strict_review", "verdicts"),
 ]
-
-# Whitelisted files for direct access (must be under ALLOWED_ROOTS)
-ALLOWED_FILES = {
-    "frontend_governance": "30_FRONTEND_GOVERNANCE.md",
-    "scope": "11_SCOPE.md",
-    "gates": "20_GATES.md",
-    "validation": "13_VALIDATION.md",
-    "coding_standard": "12_CODING_STANDARD.md",
-    "architecture": "14_ARCHITECTURE.md",
-    "database": "17_DATABASE.md",
-    "review": "04_REVIEW.md",
-    "architect": "02_ARCHITECT.md",
-    "implementor": "03_IMPLEMENTOR.md",
-    "human": "01_HUMAN.md",
-    "role_interaction": "99_ROLEINTERACTION.md",
-    "bridge": "100_BRIDGE.md",
-    "git_policy": "15_GIT_POLICY.md",
-    "file_access": "16_FILE_ACCESS.md",
-    "index_html": "../templates/index.html",
-}
 
 FRONTEND_IMPACT_BLOCK = """## Frontend Impact
 
@@ -95,7 +85,7 @@ Reason: <why frontend is not affected>"""
 
 # ── Database configuration (Phase 3) ───────────────────────────
 
-DB_PATH = "/home/svend/DPMtF-WebUI/databases/dpmtf.db"
+DB_PATH = os.path.join(WEBUI_ROOT, "databases", "dpmtf.db")
 
 # Whitelisted tables for read-only queries
 ALLOWED_TABLES = {
@@ -222,9 +212,12 @@ def tool_get_governance_file(name: str) -> str:
     return f"Governance file not found: {name}"
 
 
-@mcp.tool(name="get_required_frontend_impact_block", description="Return the standard Frontend Impact block for output")
-def tool_get_required_frontend_impact_block() -> str:
-    return FRONTEND_IMPACT_BLOCK + "\n\n" + NO_FRONTEND_IMPACT_BLOCK
+@mcp.tool(name="get_required_frontend_impact_block", description="Return the standard Frontend Impact block for output. Pass has_impact=false to get the 'No frontend impact.' variant.")
+def tool_get_required_frontend_impact_block(has_impact: bool = True) -> str:
+    # One block, never both: concatenating them emitted two contradictory
+    # "## Frontend Impact" headings and an agent copying the result produced a
+    # malformed block. The caller states which case applies.
+    return FRONTEND_IMPACT_BLOCK if has_impact else NO_FRONTEND_IMPACT_BLOCK
 
 
 @mcp.tool(name="get_panel_groups", description="Return known panel groups (Daily, Journals, Reports, Periodic, Setup)")
@@ -256,12 +249,7 @@ def tool_get_panel_subgroups() -> str:
 @mcp.tool(name="get_existing_panels", description="Return existing panels with keys, titles, and locations")
 def tool_get_existing_panels() -> str:
     """Return existing panels from index.html structure."""
-    index_path = os.path.join(
-        ALLOWED_ROOTS[3], "index.html"  # templates dir
-    )
-    # Actually index.html is in templates/ which is ALLOWED_ROOTS[3]
-    # But the path is templates/index.html, let me fix:
-    index_path = "/home/svend/DPMtF-WebUI/templates/index.html"
+    index_path = INDEX_HTML_PATH
     if not _is_allowed_path(index_path):
         return "Error: index.html not accessible."
 
@@ -297,7 +285,7 @@ def tool_get_existing_panels() -> str:
 @mcp.tool(name="get_index_structure", description="Return a short overview of index.html structure")
 def tool_get_index_structure() -> str:
     """Return a short overview of index.html structure."""
-    index_path = "/home/svend/DPMtF-WebUI/templates/index.html"
+    index_path = INDEX_HTML_PATH
     if not _is_allowed_path(index_path):
         return "Error: index.html not accessible."
 
@@ -329,6 +317,7 @@ def tool_search_context(query: str) -> str:
         return "Error: Query must be at least 2 characters."
 
     results = []
+    unreadable = []
     for root in ALLOWED_ROOTS:
         if not os.path.isdir(root):
             continue
@@ -345,12 +334,16 @@ def tool_search_context(query: str) -> str:
                             results.append(
                                 f"{fname}:{lineno}: {line.strip()[:120]}"
                             )
-            except Exception:
-                pass
+            except OSError as e:
+                # Surface the miss: a swallowed read makes an unreadable file
+                # indistinguishable from "not there", i.e. a false negative.
+                unreadable.append(f"{fname}: [unreadable: {e}]")
 
+    footer = ("\n\nWARNING — files skipped, results may be incomplete:\n"
+              + "\n".join(unreadable)) if unreadable else ""
     if not results:
-        return f"No results found for: {query}"
-    return "\n".join(results[:50])  # Max 50 results
+        return f"No results found for: {query}{footer}"
+    return "\n".join(results[:50]) + footer  # Max 50 result lines
 
 
 @mcp.tool(name="search_verdicts", description="Search for a query in verdict files")
@@ -359,7 +352,7 @@ def tool_search_verdicts(query: str) -> str:
     if not query or len(query) < 2:
         return "Error: Query must be at least 2 characters."
 
-    verdicts_dir = "/home/svend/flows/strict_review/verdicts"
+    verdicts_dir = os.path.join(FLOWS_ROOT, "strict_review", "verdicts")
     if not os.path.isdir(verdicts_dir):
         return "Verdicts directory not found."
 
@@ -594,7 +587,7 @@ def tool_find_reusable_panel(feature_name: str) -> str:
     if not feature_name:
         return "Error: feature_name is required."
 
-    index_path = "/home/svend/DPMtF-WebUI/templates/index.html"
+    index_path = INDEX_HTML_PATH
     if not _is_allowed_path(index_path):
         return "Error: index.html not accessible."
 
@@ -713,7 +706,7 @@ MANDATORY_LOCALES = ("en-US", "da-DK", "de-DE", "es-ES")
 # tool surface never accepts arbitrary filesystem paths.
 I18N_DBS = {
     "dpmtf": DB_PATH,
-    "model-allocator": "/home/svend/model-allocator/allocator.db",
+    "model-allocator": os.path.join(ALLOCATOR_ROOT, "allocator.db"),
 }
 
 
