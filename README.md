@@ -96,7 +96,7 @@ mcp-light v1.4.0 — Phase 4 (read-only context + SQLite + review helpers)
 Listening on http://127.0.0.1:9135/mcp
 Health check: http://127.0.0.1:9135/health
 Allowed roots: 6
-Available tools: 22
+Available tools: 24
 ```
 
 ### Stop
@@ -166,7 +166,7 @@ Placering: `~/.config/opencode-roles/\<rolle\>/opencode.json`
 ## Remote access over Tailscale
 
 A client on another machine cannot reach `127.0.0.1`. Since the server is
-entirely read-only — 22 tools, no `INSERT`/`UPDATE`/`DELETE`, no file writes —
+entirely read-only — 24 tools, no `INSERT`/`UPDATE`/`DELETE`, no file writes —
 a **second instance** can serve remote clients over Tailscale without
 affecting the local one. Two processes over one database cannot conflict, and
 local role configs keep pointing at loopback.
@@ -257,6 +257,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `get_frontend_governance` | — | `30_FRONTEND_GOVERNANCE.md` |
 | `get_governance_index` | — | List of all governance templates with titles |
 | `get_governance_file` | `name` (e.g. `11_SCOPE.md`) | Content of a specific template |
+| `get_patcher_usage` | — | Deterministic Patcher usage guide (`docs/specs/DETERMINISTIC_PATCHER_USAGE.md`): PatchRequest format, engines, CLI |
 | `get_required_frontend_impact_block` | — | Standard Frontend Impact block for output |
 | `search_context` | `query` | Search results in governance/context files |
 | `search_verdicts` | `query` | Search results in verdict files |
@@ -277,6 +278,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `get_flow` | `flow_key` | Flow details from `bridge_flows` |
 | `get_role` | `role_key` | Role details from `bridge_roles` (whitelisted columns only) |
 | `get_flow_steps` | `flow_key` | Steps for a flow from `bridge_flow_steps` |
+| `get_implementation_mode` | `flow_key`, `step_key?`, `role_key?` | Resolved Deterministic Patcher mode (precedence role > step > flow > `direct`) with per-level stored values |
 | `get_panel_subgroups_dynamic` | — | Subgroups live from `panel_subgroups` |
 | `get_panel_mappings` | — | Slot→subgroup mappings from `panel_subgroup_mappings` |
 

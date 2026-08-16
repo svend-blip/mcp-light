@@ -60,6 +60,7 @@ INDEX_HTML_PATH = os.path.join(WEBUI_ROOT, "templates", "index.html")
 ALLOWED_ROOTS = [
     os.path.join(WEBUI_ROOT, "docs", "governance-templates-v2"),
     os.path.join(WEBUI_ROOT, "docs", "prompt-runs"),
+    os.path.join(WEBUI_ROOT, "docs", "specs"),
     os.path.join(WEBUI_ROOT, "templates"),
     os.path.join(WEBUI_ROOT, "static", "js"),
     os.path.join(FLOWS_ROOT, "strict_review", "verdicts"),
@@ -102,7 +103,7 @@ ALLOWED_COLUMNS = {
         "role_key", "tmux_session", "default_runtime", "default_provider",
         "default_model", "config_dir", "model_type", "cloud_model",
         "ollama_model", "governance_file", "role_type", "enter_command",
-        "is_active",
+        "is_active", "implementation_mode",
     },
 }
 
@@ -440,6 +441,127 @@ def tool_get_flow_steps(flow_key: str) -> str:
         return json.dumps([dict(r) for r in rows], indent=2, default=str)
     finally:
         conn.close()
+
+
+@mcp.tool(
+    name="get_implementation_mode",
+    description=(
+        "Resolve the effective Deterministic Patcher implementation_mode "
+        "for a dispatch target (precedence role > step > flow > default "
+        "'direct'). Returns the per-level stored values and the resolved "
+        "mode, so a role can verify its own mode against the database "
+        "instead of taking the injected prompt's word for it."
+    ),
+)
+def tool_get_implementation_mode(
+    flow_key: str, step_key: str = "", role_key: str = ""
+) -> str:
+    """Resolve implementation_mode with per-level transparency.
+
+    Mirrors scripts/bridgeV002/patch_mode.py's precedence walk (spec
+    sections 41-42) over a read-only connection. A stored value outside
+    the allowed set is REPORTED rather than raised — this server informs;
+    enforcement lives in dispatch, which refuses to run on such a row.
+    Pre-052 databases (no implementation_mode columns) resolve to
+    'direct' with a note, the same backward-compatible reading dispatch
+    applies.
+    """
+    if not flow_key:
+        return "Error: flow_key is required."
+    allowed_modes = ("direct", "deterministic_patch")
+
+    def _level(conn, table, where, params):
+        row = conn.execute(
+            f"SELECT implementation_mode FROM {_safe_table(table)} "
+            f"WHERE {where}",
+            params,
+        ).fetchone()
+        if row is None:
+            return None, False          # no row at this level
+        value = row["implementation_mode"]
+        if value is None or str(value).strip() == "":
+            return None, True           # row exists, value unset
+        return str(value).strip(), True
+
+    conn = _get_db_connection()
+    try:
+        levels = {}
+        row_found = {}
+        levels["role"], row_found["role"] = (
+            _level(conn, "bridge_roles", "role_key = ?", (role_key,))
+            if role_key else (None, False)
+        )
+        levels["step"], row_found["step"] = (
+            _level(conn, "bridge_flow_steps",
+                   "flow_key = ? AND step_key = ?", (flow_key, step_key))
+            if step_key else (None, False)
+        )
+        levels["flow"], row_found["flow"] = _level(
+            conn, "bridge_flows", "flow_key = ?", (flow_key,)
+        )
+    except sqlite3.OperationalError as exc:
+        if "implementation_mode" in str(exc):
+            return json.dumps({
+                "resolved": "direct",
+                "source_level": "default",
+                "note": (
+                    "database predates migration 052 (no "
+                    "implementation_mode columns); dispatch treats this "
+                    "as 'direct' everywhere"
+                ),
+            }, indent=2)
+        raise
+    finally:
+        conn.close()
+
+    invalid = {
+        lvl: val for lvl, val in levels.items()
+        if val is not None and val not in allowed_modes
+    }
+    resolved, source = "direct", "default"
+    for lvl in ("role", "step", "flow"):
+        if levels[lvl] in allowed_modes:
+            resolved, source = levels[lvl], lvl
+            break
+        if levels[lvl] is not None:
+            break                        # invalid value wins the walk: report it
+
+    result = {
+        "flow_key": flow_key,
+        "step_key": step_key or None,
+        "role_key": role_key or None,
+        "levels": levels,
+        "resolved": resolved,
+        "source_level": source,
+    }
+    if not row_found["flow"]:
+        result["note"] = f"flow not found: {flow_key}"
+    if invalid:
+        result["invalid_values"] = invalid
+        result["warning"] = (
+            "a stored value is outside {'direct', 'deterministic_patch'}; "
+            "dispatch raises ValueError on this row and the chain stops — "
+            "fix the row before dispatching"
+        )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="get_patcher_usage",
+    description=(
+        "Return the Deterministic Patcher usage guide "
+        "(DETERMINISTIC_PATCHER_USAGE.md): PatchRequest format, engines, "
+        "CLI invocation, and result semantics. For roles operating under "
+        "implementation_mode = deterministic_patch."
+    ),
+)
+def tool_get_patcher_usage() -> str:
+    """Serve the patcher usage guide from docs/specs (allowed root)."""
+    path = _resolve_governance_file("DETERMINISTIC_PATCHER_USAGE.md")
+    if path:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    return "DETERMINISTIC_PATCHER_USAGE.md not found in allowed roots."
 
 
 @mcp.tool(name="get_panel_subgroups_dynamic", description="Return panel subgroups from database (Phase 3)")
