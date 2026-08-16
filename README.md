@@ -90,14 +90,10 @@ cd /home/svend/mcp-light
 python3 server.py
 ```
 
-Output:
-```
-mcp-light v1.4.0 — Phase 4 (read-only context + SQLite + review helpers)
-Listening on http://127.0.0.1:9135/mcp
-Health check: http://127.0.0.1:9135/health
-Allowed roots: 6
-Available tools: 24
-```
+The server prints no banner of its own — FastMCP/uvicorn log lines appear
+as requests arrive. It listens on `http://127.0.0.1:9135/mcp`
+(health: `/health`), reads 6 allowed roots, and registers **24 tools**
+(verify with an MCP `tools/list` call).
 
 ### Stop
 
@@ -420,7 +416,8 @@ instance is unaffected.
 
 | Phase | Status | Content |
 |------|--------|---------|
-| 1 — Context | ✅ | Read-only file access, 6 tools |
+| 1 — Context | ✅ | Read-only file access, 7 tools (incl. `get_patcher_usage`, 2026-08-16) |
 | 2 — Frontend | ✅ | Panel structure, 4 tools |
-| 3 — Database | ✅ | SQLite read-only, 5 tools |
+| 3 — Database | ✅ | SQLite read-only, 6 tools (incl. `get_implementation_mode`, 2026-08-16) |
 | 4 — Review | ✅ | Validation and suggestions, 3 tools |
+| 5 — Coding standard | ✅ | i18n/auto-fail enforcement (2026-08-08), 4 tools |
