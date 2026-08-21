@@ -1,6 +1,10 @@
 # mcp-light
 
-Local read-only MCP context server for DPMtF.
+Local read-only MCP context server for DPMtF (Deterministic Process
+Management to Finalisation — a deterministic multi-agent process
+orchestration framework for taking defined work from intent to verified
+finalisation through governed flows, steps, roles, harnesses, models,
+gates, and artifacts).
 
 Provides Claude Code and OpenCode with access to governance, panel structure,
 and project context — without being tied to a specific agent tool.
