@@ -276,8 +276,9 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | Tool | Argument | Returns |
 |------|----------|---------|
 | `get_flow` | `flow_key` | Flow details from `bridge_flows` |
-| `get_role` | `role_key` | Role details from `bridge_roles` (whitelisted columns only) |
+| `get_role` | `role_key` | Role details from `bridge_roles` (whitelisted columns only). `governance_file` is the raw role-level value — step-level overrides exist in `bridge_flow_steps`. Use `get_execution_config` for the resolved governance and its source level |
 | `get_flow_steps` | `flow_key` | Steps for a flow from `bridge_flow_steps` |
+| `get_execution_config` | `flow_key`, `step_key` | Resolved governance/model/harness each with `source_level`, verbatim from DPMtF's resolver (`scripts/bridgeV002/execution_config.py`). THE resolution surface for step-level overrides (Run 016 / D1). Returns a JSON error string (does not raise) for unknown flow/step |
 | `get_implementation_mode` | `flow_key`, `step_key?`, `role_key?` | Resolved Deterministic Patcher mode (precedence role > step > flow > `direct`) with per-level stored values |
 | `get_panel_subgroups_dynamic` | — | Subgroups live from `panel_subgroups` |
 | `get_panel_mappings` | — | Slot→subgroup mappings from `panel_subgroup_mappings` |

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 
 from mcp.server.fastmcp import FastMCP
 
@@ -87,6 +88,16 @@ Reason: <why frontend is not affected>"""
 # ── Database configuration (Phase 3) ───────────────────────────
 
 DB_PATH = os.path.join(WEBUI_ROOT, "databases", "dpmtf.db")
+
+# ── Resolver import (Run 016 / D1) ─────────────────────────────
+# get_execution_config imports DPMtF's resolver from scripts/bridgeV002/
+# so the STEP -> ROLE -> SYSTEM precedence walk lives in ONE place
+# (execution_config.py). mcp-light must not re-implement it. The path
+# is derived from WEBUI_ROOT (no hardcoded /home/svend).
+_BRIDGE_DIR = os.path.join(WEBUI_ROOT, "scripts", "bridgeV002")
+if _BRIDGE_DIR not in sys.path:
+    sys.path.insert(0, _BRIDGE_DIR)
+import execution_config  # noqa: E402
 
 # Whitelisted tables for read-only queries
 ALLOWED_TABLES = {
@@ -401,9 +412,23 @@ def tool_get_flow(flow_key: str) -> str:
         conn.close()
 
 
-@mcp.tool(name="get_role", description="Return role details from database (Phase 3)")
+@mcp.tool(
+    name="get_role",
+    description=(
+        "Return role details from database (Phase 3). NOTE: governance_file "
+        "is the RAW role-level value; step-level overrides exist in "
+        "bridge_flow_steps. Use get_execution_config(flow_key, step_key) "
+        "for the resolved governance and its source level."
+    ),
+)
 def tool_get_role(role_key: str) -> str:
-    """Return role details from database."""
+    """Return role details from database.
+
+    governance_file in the response is the raw role-level value (no
+    silent semantics change). The _note field added below points callers
+    at get_execution_config for the resolved governance when step-level
+    overrides are in play.
+    """
     if not role_key:
         return "Error: role_key is required."
     conn = _get_db_connection()
@@ -417,7 +442,14 @@ def tool_get_role(role_key: str) -> str:
         ).fetchone()
         if row is None:
             return f"Role not found: {role_key}"
-        return json.dumps(_row_to_dict(row, table, safe_cols), indent=2, default=str)
+        result = _row_to_dict(row, table, safe_cols)
+        result["_note"] = (
+            "governance_file is the raw role-level value; step-level "
+            "overrides exist in bridge_flow_steps. Use "
+            "get_execution_config(flow_key, step_key) for the resolved "
+            "governance and its source level."
+        )
+        return json.dumps(result, indent=2, default=str)
     finally:
         conn.close()
 
@@ -441,6 +473,43 @@ def tool_get_flow_steps(flow_key: str) -> str:
         return json.dumps([dict(r) for r in rows], indent=2, default=str)
     finally:
         conn.close()
+
+
+@mcp.tool(
+    name="get_execution_config",
+    description=(
+        "Resolve the unified execution config for (flow_key, step_key) by "
+        "IMPORTING DPMtF's resolver (scripts/bridgeV002/execution_config.py) "
+        "— never re-implementing the STEP -> ROLE -> SYSTEM precedence walk. "
+        "Returns the resolved governance_file, model_source/alias, and "
+        "harness_source/profile, each with its source_level ('step'/'role'/"
+        "'system'), plus implementation_mode. This is THE resolution "
+        "surface for step-level governance overrides (Run 016 / D1). Read-only; "
+        "does not write to the database."
+    ),
+)
+def tool_get_execution_config(flow_key: str, step_key: str) -> str:
+    """Resolve and return the unified execution config dict verbatim.
+
+    Delegates to execution_config.resolve_execution_config (the single
+    precedence source). Reports ValueError as a JSON error string rather
+    than raising, so a caller probing for an unknown flow/step gets a
+    well-formed error and the surrounding testgoal stays green. The DB
+    path is passed explicitly so mcp-light stays behaviorally read-only
+    even though the resolver owns its own sqlite connection (Run 016
+    rehearsal caveat).
+    """
+    if not flow_key:
+        return json.dumps({"error": "flow_key is required"}, indent=2)
+    if not step_key:
+        return json.dumps({"error": "step_key is required"}, indent=2)
+    try:
+        resolved = execution_config.resolve_execution_config(
+            flow_key, step_key, db_path=DB_PATH
+        )
+    except ValueError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    return json.dumps(resolved, indent=2, default=str)
 
 
 @mcp.tool(
