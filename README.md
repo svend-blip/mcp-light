@@ -11,7 +11,9 @@ and project context — without being tied to a specific agent tool.
 
 ---
 
-## Place in the DPMtF Ecosystem
+## Overview
+
+### Place in the DPMtF Ecosystem
 
 Four components, one machine boundary:
 
@@ -69,9 +71,7 @@ Two instances of the same read-only server, one per bind address. See
 
 ---
 
-## Installation
-
-### Requirements
+## Requirements
 
 - Python 3.8+
 - `mcp[cli]` (see `requirements.txt`) — installed in `venv/`
@@ -84,13 +84,57 @@ HTTP and can be on another host (see below).
 It reads TWO databases, both in read-only mode: Father's
 `DPMtF-WebUI/databases/dpmtf.db` (governance, flows, roles, verdicts,
 panels, i18n) and `model-allocator/allocator.db` (the i18n-completeness
-check for the allocator UI). Roots are configurable via `DPMTF_WEBUI_ROOT`,
-`DPMTF_FLOWS_ROOT` and `DPMTF_ALLOCATOR_ROOT`.
+check for the allocator UI).
+
+## Installation
+
+### Install manually
+
+```bash
+git clone https://github.com/svend-blip/mcp-light.git
+cd mcp-light
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+```
+
+### Install using an Agent
+
+Point your coding agent at this repository and ask it to run the manual
+steps; there is one dependency (`mcp[cli]`) and one file (`server.py`).
+The agent must run on the machine holding the DPMtF-WebUI checkout, or set
+the root overrides (see Configuration) to reach it.
+
+### Verify installation
+
+```bash
+venv/bin/python server.py &      # or: python3 server.py
+curl http://127.0.0.1:9135/health
+```
+
+```json
+{"status": "ok", "server": "mcp-light", "version": "1.4.0", "phase": 4}
+```
+
+## Configuration
+
+Everything is environment variables with safe defaults:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MCP_LIGHT_HOST` | `127.0.0.1` | bind address (the tailnet unit overrides it) |
+| `MCP_LIGHT_PORT` | `9135` | bind port |
+| `DPMTF_WEBUI_ROOT` | `~/DPMtF-WebUI` | Father checkout (governance, DB, templates) |
+| `DPMTF_FLOWS_ROOT` | `~/flows` | flow workspace (verdict lookup) |
+| `DPMTF_ALLOCATOR_ROOT` | `~/model-allocator` | allocator checkout (i18n check) |
+
+No config file, no secrets: the server is read-only and unauthenticated —
+its security model is the bind address (see the Tailscale section).
+
+## Running
 
 ### Start
 
 ```bash
-cd /home/svend/mcp-light
 python3 server.py
 ```
 
@@ -123,15 +167,15 @@ systemctl --user status mcp-light
 Without `enable-linger` the unit starts on login and stops on logout, which
 on a headless host means it never starts at all.
 
-### Health check
+## Testing
 
 ```bash
-curl http://127.0.0.1:9135/health
+venv/bin/python -m pytest tests/ -q
 ```
 
-```json
-{"status": "ok", "server": "mcp-light", "version": "1.4.0", "phase": 4}
-```
+One integration test today (`test_execution_config_tool.py`, run with cwd =
+the DPMtF-WebUI checkout, as its header states); broader per-tool coverage
+is an open improvement.
 
 ---
 
