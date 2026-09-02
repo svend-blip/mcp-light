@@ -16,8 +16,8 @@ import sys
 from mcp.server.fastmcp import FastMCP
 
 # mcp-light — read-only MCP context server for DPMtF.
-# Transport: FastMCP streamable-http. The 22 tool_* functions below are the
-# same read-only logic from phases 1-4, now registered with FastMCP.
+# Transport: FastMCP streamable-http. The 29 tool_* functions below are the
+# same read-only logic from phases 1-6, registered with FastMCP.
 # host/port/streamable_http_path are CONSTRUCTOR kwargs (not run() kwargs) in mcp 1.28.1.
 # Bind address from the environment, loopback by default.
 #
@@ -29,7 +29,7 @@ from mcp.server.fastmcp import FastMCP
 # this instance -- 0.0.0.0 would also expose it on the wifi LAN and on three
 # docker bridges, which is a surface that is easy to forget -- a SECOND
 # instance is started bound to the Tailscale address. The server is entirely
-# read-only (22 tools, no INSERT/UPDATE/DELETE, no writes), so two instances
+# read-only (29 tools, no INSERT/UPDATE/DELETE, no writes), so two instances
 # over one database cannot conflict, and Father's thirteen role configs keep
 # pointing at loopback and are unaffected by anything the worker does.
 #
@@ -99,6 +99,15 @@ if _BRIDGE_DIR not in sys.path:
     sys.path.insert(0, _BRIDGE_DIR)
 import execution_config  # noqa: E402
 
+# Phase 6 flow-state logic lives beside this file. It imports DPMtF's pure
+# helpers (supervisor_state, check_testgoals) from _BRIDGE_DIR, so it must
+# come after the sys.path insert above; the mcp-light directory itself is
+# on sys.path because server.py is run as a script from it.
+_MCP_LIGHT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _MCP_LIGHT_DIR not in sys.path:
+    sys.path.insert(0, _MCP_LIGHT_DIR)
+import flow_state  # noqa: E402
+
 # Whitelisted tables for read-only queries
 ALLOWED_TABLES = {
     "bridge_flows",
@@ -106,6 +115,10 @@ ALLOWED_TABLES = {
     "bridge_flow_steps",
     "panel_subgroups",
     "panel_subgroup_mappings",
+    # Phase 6 (flow state): queues and counters, read-only, never content.
+    "bridge_dispatch_queue",
+    "bridge_materialize_queue",
+    "bridge_id_counters",
 }
 
 # Whitelisted columns per table (empty = all columns allowed)
@@ -1188,6 +1201,175 @@ def tool_find_duplicate_labels(project: str = "dpmtf") -> str:
             "3. Deactivate the duplicate (is_active = 0) — never DELETE.",
         ],
     }, indent=2)
+
+
+# ── Phase 6: Flow state for supervisors ────────────────────────
+#
+# Four read-only tools that answer "where is this flow" for a planning
+# supervisor (or a Human) without the ten shell commands supervisor_state.py
+# was written to replace -- and without that script's port/tmux probes,
+# which an MCP tool called from a sandboxed role has no business making.
+# The logic is in flow_state.py; these wrappers only bind FLOWS_ROOT and
+# DB_PATH (read at call time so tests can repoint them) and turn every
+# exception into an {"error": ...} payload. FLOWS_ROOT is NOT added to
+# ALLOWED_ROOTS: the file readers here go through flow_state._flow_path,
+# which confines them to <FLOWS_ROOT>/<artifact_root>/ and trace.log.
+
+_PHASE6_NOTE = flow_state.LIVENESS_NOTE
+
+
+def _phase6_error(exc):
+    kind = type(exc).__name__
+    return json.dumps({"error": f"{kind}: {exc}"}, indent=2)
+
+
+@mcp.tool(
+    name="get_flow_scope",
+    description=(
+        "Read-only. SCOPE.md at a flow's artifact root (bridge_flows."
+        "artifact_root, shared by sibling flows such as 9000-01-PLOOP / "
+        "9000-02-ELOOP). mode: full (content), headings, head (first 60 "
+        "lines). A missing SCOPE.md is reported as exists=false, not as an "
+        "error. Unknown flow_key -> {error} (Phase 6)"
+    ),
+)
+def tool_get_flow_scope(flow_key: str, mode: str = "full") -> str:
+    try:
+        flow = flow_state.resolve_flow(flow_key, DB_PATH)
+        root_dir = flow_state._flow_path(FLOWS_ROOT, flow["artifact_root"])
+        payload = flow_state.scope(root_dir, mode)
+        payload["flow_key"] = flow_key
+        payload["artifact_root"] = flow["artifact_root"]
+        return json.dumps(payload, indent=2)
+    except Exception as exc:  # noqa: BLE001 - tools report, never raise
+        return _phase6_error(exc)
+
+
+@mcp.tool(
+    name="get_flow_state",
+    description=(
+        "Read-only one-shot state for a flow's supervisor: flow config "
+        "(artifact root, siblings, target project, supervisor role/mandate/"
+        "cadence, cold-start skill, counter), run classification (closed / "
+        "executing = LOWEST open run with kickoff evidence / promoted_waiting "
+        "/ anomalies), the executing run's owned handoffs, current deliverables "
+        "and last trace signal, GOAL-DRAFTs with promotability, dispatch and "
+        "materialize queue counts, trace tail, and a phase in {AWAIT_SCOPE, "
+        "AUTHOR_DRAFTS, AWAIT_PROMOTION, KICKOFF_NEXT_RUN, CHAIN_RUNNING, "
+        "VERDICT_READY, STALLED, ALL_RUNS_CLOSED} with a one-line assessment. "
+        "tmux sessions and ports are NOT probed (see _note). Unknown "
+        "flow_key -> {error} (Phase 6)"
+    ),
+)
+def tool_get_flow_state(flow_key: str) -> str:
+    try:
+        state = flow_state.collect_state(flow_key, FLOWS_ROOT, DB_PATH)
+        # Cross-check against DPMtF's own reading when it offers one. Its
+        # executing_run resolves the artifact root through Father's live
+        # database rather than DB_PATH, so a disagreement is reported, not
+        # adopted.
+        sv = getattr(flow_state, "_sv", None)
+        helper = getattr(sv, "executing_run", None)
+        if helper is not None and os.path.isdir(FLOWS_ROOT):
+            try:
+                theirs = helper(FLOWS_ROOT, flow_key)
+            except Exception as exc:  # noqa: BLE001 - advisory only
+                theirs = f"unavailable: {type(exc).__name__}: {exc}"
+            if theirs is not None:
+                state["dpmtf_cross_check"] = {
+                    "executing_run": theirs,
+                    "agrees": theirs == state["runs"]["executing"],
+                }
+        return json.dumps(state, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        return _phase6_error(exc)
+
+
+@mcp.tool(
+    name="get_run",
+    description=(
+        "Read-only detail for one run of a flow: status (closed / executing / "
+        "promoted_waiting / draft / anomaly / missing), artefact files, "
+        "first handoff id, the handoffs it owns with their deliverables and "
+        "last trace signal, and on request the contents of GOAL.md / "
+        "RUN-LEDGER.md / END-REPORT.md (include=goal,ledger,end_report; also "
+        "draft, backlog). ledger_tail_entries>0 returns only the last N '## ' "
+        "ledger entries. run_id accepts 21 or 021. tmux/ports NOT probed. "
+        "Errors -> {error} (Phase 6)"
+    ),
+)
+def tool_get_run(
+    flow_key: str,
+    run_id: int,
+    include: str = "goal,ledger,end_report",
+    ledger_tail_entries: int = 0,
+) -> str:
+    try:
+        payload = flow_state.run_detail(
+            flow_key, run_id, FLOWS_ROOT, DB_PATH,
+            include=include, ledger_tail_entries=ledger_tail_entries,
+        )
+        return json.dumps(payload, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        return _phase6_error(exc)
+
+
+@mcp.tool(
+    name="list_goal_drafts",
+    description=(
+        "Read-only list of GOAL-DRAFT files for a flow's artifact root, from "
+        "both goals/{N}-GOAL-DRAFT.md and runs/NNN/GOAL-DRAFT.md, with the "
+        "testgoals block parse status (ok / malformed / absent; parsed with "
+        "DPMtF's check_testgoals.parse_block, nothing executed) and "
+        "promotable = whether promote-goal would accept it (refuses when "
+        "GOAL.md or END-REPORT.md already exist or the block is malformed). "
+        "Errors -> {error} (Phase 6)"
+    ),
+)
+def tool_list_goal_drafts(flow_key: str) -> str:
+    try:
+        flow = flow_state.resolve_flow(flow_key, DB_PATH)
+        root_dir = flow_state._flow_path(FLOWS_ROOT, flow["artifact_root"])
+        items = flow_state.drafts(root_dir)
+        return json.dumps({
+            "flow_key": flow_key,
+            "artifact_root": flow["artifact_root"],
+            "count": len(items),
+            "promotable": [d["run"] for d in items if d["promotable"]],
+            "drafts": items,
+            "_note": "Parsed only; no testgoal was executed and nothing was promoted.",
+        }, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        return _phase6_error(exc)
+
+
+# ── Health ─────────────────────────────────────────────────────
+# GET /health beside the MCP endpoint, for curl and systemd-style checks.
+# FastMCP.custom_route (mcp 1.28.1) mounts it on the same Starlette app as
+# /mcp; it needs no MCP handshake and no authorization.
+
+SERVER_VERSION = "1.5.0"
+SERVER_PHASE = 6
+
+
+def _tool_count():
+    try:
+        return len(mcp._tool_manager.list_tools())
+    except Exception:  # noqa: BLE001 - a count is a nicety, not a contract
+        return None
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request):  # noqa: ARG001 - Starlette signature
+    from starlette.responses import JSONResponse
+
+    return JSONResponse({
+        "status": "ok",
+        "server": "mcp-light",
+        "version": SERVER_VERSION,
+        "phase": SERVER_PHASE,
+        "tools": _tool_count(),
+    })
 
 
 # ── Main ───────────────────────────────────────────────────────

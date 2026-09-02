@@ -140,7 +140,7 @@ curl http://127.0.0.1:9135/health
 ```
 
 ```json
-{"status": "ok", "server": "mcp-light", "version": "1.4.0", "phase": 4}
+{"status": "ok", "server": "mcp-light", "version": "1.5.0", "phase": 6, "tools": 29}
 ```
 
 ## Configuration
@@ -168,7 +168,8 @@ python3 server.py
 
 The server prints no banner of its own — FastMCP/uvicorn log lines appear
 as requests arrive. It listens on `http://127.0.0.1:9135/mcp`
-(health: `/health`), reads 6 allowed roots, and registers **24 tools**
+(health: `/health`, a plain GET registered via `FastMCP.custom_route`),
+reads 6 allowed roots, and registers **29 tools**
 (verify with an MCP `tools/list` call).
 
 ### Stop
@@ -201,9 +202,11 @@ on a headless host means it never starts at all.
 venv/bin/python -m pytest tests/ -q
 ```
 
-One integration test today (`test_execution_config_tool.py`, run with cwd =
-the DPMtF-WebUI checkout, as its header states); broader per-tool coverage
-is an open improvement.
+Two suites: `test_execution_config_tool.py` is an integration test against
+the live database (run with cwd = the DPMtF-WebUI checkout, as its header
+states); `test_flow_state_tools.py` covers the Phase 6 tools against a
+temporary 9000-like flows root and a temporary SQLite database built in
+`tests/conftest.py`, so it touches neither the live workspace nor `dpmtf.db`.
 
 ---
 
@@ -238,7 +241,7 @@ Placering: `~/.config/opencode-roles/\<rolle\>/opencode.json`
 ## Remote access over Tailscale
 
 A client on another machine cannot reach `127.0.0.1`. Since the server is
-entirely read-only — 24 tools, no `INSERT`/`UPDATE`/`DELETE`, no file writes —
+entirely read-only — 29 tools, no `INSERT`/`UPDATE`/`DELETE`, no file writes —
 a **second instance** can serve remote clients over Tailscale without
 affecting the local one. Two processes over one database cannot conflict, and
 local role configs keep pointing at loopback.
@@ -320,7 +323,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 ---
 
-## Available Tools (22)
+## Available Tools (29)
 
 ### Phase 1 — Context retrieval
 
@@ -371,6 +374,25 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `validate_frontend_code` | `code_text`, `filename?` | Mechanical scan for 12_CODING_STANDARD auto-fail patterns (innerHTML, var, inline style, hardcoded paths); warnings for suspected un-`lbl()`ed text |
 | `find_reusable_label` | `text`, `description?`, `project?` | The FIND half of find-or-create: `reuse` (existing identical label + slot-mapping SQL) or `create` (4-locale SQL template). Call BEFORE creating any label |
 | `find_duplicate_labels` | `project?` | Label groups with identical text+description that should be merged (keep one, repoint slots, deactivate the rest) |
+
+### Phase 6 — Flow state for supervisors (2026-09-02)
+
+Read-only answers to "where is this flow" for a planning supervisor or a
+Human, replacing the shell-command reconstruction a cold-started supervisor
+otherwise performs. Paths are resolved through `bridge_flows.artifact_root`,
+so sibling flows sharing one workspace (`9000-01-PLOOP` / `9000-02-ELOOP`)
+report the same runs. Handoff ids match in both forms (`21` and `021`).
+**tmux sessions, ports and model servers are NOT probed** — `executing`
+means the run's artefacts say so, not that anything is alive (every payload
+carries this in `_note`). Unknown flow, bad id or a path that would leave
+the flows root come back as `{"error": ...}`; nothing raises.
+
+| Tool | Argument | Returns |
+|------|----------|---------|
+| `get_flow_scope` | `flow_key`, `mode?` (`full`/`headings`/`head`) | `SCOPE.md` at the artifact root; a missing file is `exists: false`, not an error |
+| `get_flow_state` | `flow_key` | Flow config (artifact root, siblings, target project, supervisor role/mandate/cadence, cold-start skill, id counters); run classification — `closed`, `executing` (the **lowest** open run with kickoff evidence: a numeric first-handoff floor or a ledger heading saying "opened"; after a bulk promotion the newest GOAL.md is not the run being worked), `promoted_waiting`, `anomalies`; the executing run's owned handoffs, current deliverables, last trace signal, last movement and staleness; GOAL-DRAFTs with promotability; dispatch/materialize queue counts + last 5 rows; trace tail for the flow's roles; `phase` ∈ `AWAIT_SCOPE`, `AUTHOR_DRAFTS`, `AWAIT_PROMOTION`, `KICKOFF_NEXT_RUN`, `CHAIN_RUNNING`, `VERDICT_READY`, `STALLED`, `ALL_RUNS_CLOSED` with a one-line `assessment`. When DPMtF's own `supervisor_state.executing_run` is importable its answer is reported under `dpmtf_cross_check` |
+| `get_run` | `flow_key`, `run_id`, `include?` (`goal,ledger,end_report`; also `draft`, `backlog`), `ledger_tail_entries?` | One run: status (`closed`/`executing`/`promoted_waiting`/`draft`/`anomaly`/`missing`), artefact files, first handoff id, the handoffs it owns (bounded by the next run's floor) with deliverables and last trace signal, testgoals parse status, and the requested file contents; `ledger_tail_entries=N` returns only the last N `## ` ledger entries |
+| `list_goal_drafts` | `flow_key` | Drafts from both `goals/{N}-GOAL-DRAFT.md` and `runs/NNN/GOAL-DRAFT.md` with testgoals parse status (`ok`/`malformed`/`absent`, via DPMtF's `check_testgoals.parse_block`, nothing executed) and `promotable` = whether `promote-goal` would accept it (refused when `GOAL.md` or `END-REPORT.md` exists or the block is malformed; no block = promotable with a warning) |
 
 ---
 
@@ -461,7 +483,8 @@ Response:
 | Rule | Implementation |
 |------|---------------|
 | Whitelisted directories only | `ALLOWED_ROOTS` — 6 paths |
-| Whitelisted tables only | `ALLOWED_TABLES` — 5 tables |
+| Whitelisted tables only | `ALLOWED_TABLES` — 8 tables (Phase 6 adds the two queues and the id counters; queue `content` is never returned) |
+| Flow files confined | Phase 6 reads only `<flows_root>/<artifact_root>/` and `trace.log`; `flow_state._flow_path` realpath-checks every join, `flow_key` must match `^[A-Za-z0-9_.-]+$`, `run_id` is an int |
 | Whitelisted columns only | `ALLOWED_COLUMNS` — per table |
 | Read-only database | `mode=ro` in SQLite URI |
 | No `shell=True` | All subprocess calls use list arguments |
@@ -498,3 +521,4 @@ instance is unaffected.
 | 3 — Database | ✅ | SQLite read-only, 6 tools (incl. `get_implementation_mode`, 2026-08-16) |
 | 4 — Review | ✅ | Validation and suggestions, 3 tools |
 | 5 — Coding standard | ✅ | i18n/auto-fail enforcement (2026-08-08), 4 tools |
+| 6 — Flow state | ✅ | Supervisor cold-start state, read-only (2026-09-02), 4 tools |
