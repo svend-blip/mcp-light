@@ -1376,3 +1376,153 @@ async def health(request):  # noqa: ARG001 - Starlette signature
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
+
+
+# ── Phase 7: DPMtF script wrappers (Run 024 WORK 3) ────────────
+#
+# Two read-only wrappers over DPMtF scripts delivered in handoff 114.
+# get_kickoff_packet shells out to kickoff_packet.py and captures stdout;
+# on exit 2 (refusal) the stderr reason is surfaced as an error, never
+# masked as success. get_handoff_skeleton invokes handoff_skeleton.py and
+# reports the written path / exit status; the skeleton logic stays in the
+# DPMtF script, this wrapper does not re-implement it.
+#
+# DPMTF_ROOT resolves from the environment with the default shown, exactly
+# as GOAL §6 TG1 does.
+
+import subprocess as _subprocess
+
+
+def _dpmtf_root():
+    """Resolve DPMtF root from the environment, defaulting to ~/DPMtF-WebUI."""
+    return os.environ.get("DPMTF_ROOT", os.path.expanduser("~/DPMtF-WebUI"))
+
+
+@mcp.tool(
+    name="get_kickoff_packet",
+    description=(
+        "Read-only. Shells out to DPMtF's kickoff_packet.py --flow <flow> "
+        "--run <run> and returns the packet (YAML front matter + ten Kickoff "
+        "Protocol items). On exit 2 (refusal: predecessor without END-REPORT, "
+        "or dirty tree) surfaces the stderr reason as an error — never masks "
+        "a refusal as success. DPMTF_ROOT env var overrides the default "
+        "~/DPMtF-WebUI. (Run 024 WORK 3)"
+    ),
+)
+def tool_get_kickoff_packet(flow: str, run: int) -> str:
+    """Invoke kickoff_packet.py and return its stdout or a refusal error."""
+    if not flow:
+        return json.dumps({"error": "flow is required"}, indent=2)
+    try:
+        run_int = int(run)
+    except (TypeError, ValueError):
+        return json.dumps({"error": f"invalid run {run!r}: must be an integer"}, indent=2)
+    if run_int < 0:
+        return json.dumps({"error": f"invalid run {run_int}: must be >= 0"}, indent=2)
+
+    root = _dpmtf_root()
+    script = os.path.join(root, "scripts", "bridgeV002", "kickoff_packet.py")
+    if not os.path.isfile(script):
+        return json.dumps({
+            "error": f"kickoff_packet.py not found at {script}",
+            "dpmtf_root": root,
+        }, indent=2)
+
+    try:
+        proc = _subprocess.run(
+            ["python3", script, "--flow", str(flow), "--run", str(run_int)],
+            capture_output=True, text=True, timeout=30,
+            cwd=root,
+        )
+    except _subprocess.TimeoutExpired:
+        return json.dumps({
+            "error": "kickoff_packet.py timed out after 30s",
+            "flow": flow, "run": run_int,
+        }, indent=2)
+
+    if proc.returncode == 2:
+        # Refusal — surface the reason, never mask as success.
+        return json.dumps({
+            "error": "refused",
+            "reason": proc.stderr.strip() or "(no stderr)",
+            "exit_code": 2,
+            "flow": flow, "run": run_int,
+        }, indent=2)
+    if proc.returncode != 0:
+        return json.dumps({
+            "error": f"kickoff_packet.py exited {proc.returncode}",
+            "stderr": proc.stderr.strip(),
+            "flow": flow, "run": run_int,
+        }, indent=2)
+
+    return proc.stdout
+
+
+@mcp.tool(
+    name="get_handoff_skeleton",
+    description=(
+        "Shells out to DPMtF's handoff_skeleton.py --flow <flow> --id <id> "
+        "--to <to_role>. The skeleton writer stays a DPMtF script; this "
+        "wrapper invokes it and reports the written path / exit status. "
+        "DPMTF_ROOT env var overrides the default ~/DPMtF-WebUI. "
+        "(Run 024 WORK 3)"
+    ),
+)
+def tool_get_handoff_skeleton(flow: str, id: int, to: str) -> str:
+    """Invoke handoff_skeleton.py and report the result."""
+    if not flow:
+        return json.dumps({"error": "flow is required"}, indent=2)
+    if not to:
+        return json.dumps({"error": "to (target role) is required"}, indent=2)
+    try:
+        id_int = int(id)
+    except (TypeError, ValueError):
+        return json.dumps({"error": f"invalid id {id!r}: must be an integer"}, indent=2)
+    if id_int < 0:
+        return json.dumps({"error": f"invalid id {id_int}: must be >= 0"}, indent=2)
+
+    root = _dpmtf_root()
+    script = os.path.join(root, "scripts", "bridgeV002", "handoff_skeleton.py")
+    if not os.path.isfile(script):
+        return json.dumps({
+            "error": f"handoff_skeleton.py not found at {script}",
+            "dpmtf_root": root,
+        }, indent=2)
+
+    try:
+        proc = _subprocess.run(
+            ["python3", script, "--flow", str(flow), "--id", str(id_int), "--to", str(to)],
+            capture_output=True, text=True, timeout=30,
+            cwd=root,
+        )
+    except _subprocess.TimeoutExpired:
+        return json.dumps({
+            "error": "handoff_skeleton.py timed out after 30s",
+            "flow": flow, "id": id_int, "to": to,
+        }, indent=2)
+
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+
+    if proc.returncode != 0:
+        return json.dumps({
+            "error": f"handoff_skeleton.py exited {proc.returncode}",
+            "stdout": stdout,
+            "stderr": stderr,
+            "flow": flow, "id": id_int, "to": to,
+        }, indent=2)
+
+    # Parse the written path from stdout ("Wrote /path/to/file")
+    written_path = None
+    for line in stdout.splitlines():
+        if line.startswith("Wrote "):
+            written_path = line[len("Wrote "):].strip()
+            break
+
+    return json.dumps({
+        "status": "ok",
+        "written_path": written_path,
+        "stdout": stdout,
+        "stderr": stderr or None,
+        "flow": flow, "id": id_int, "to": to,
+    }, indent=2)
