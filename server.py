@@ -222,9 +222,9 @@ def tool_get_governance_index() -> str:
     return "\n".join(index) if index else "No governance files found."
 
 
-@mcp.tool(name="get_governance_file", description="Return a specific governance template by name (e.g. 11_SCOPE.md)")
-def tool_get_governance_file(name: str) -> str:
-    """Return a specific governance file by name."""
+@mcp.tool(name="get_governance_file", description="Return a specific governance template by name (e.g. 11_SCOPE.md). Optional section param returns only the named ## section.")
+def tool_get_governance_file(name: str, section: str = "") -> str:
+    """Return a specific governance file by name, optionally a single ## section."""
     # Security: only allow .md files, no path traversal
     name = os.path.basename(name)
     if not name.endswith(".md"):
@@ -233,7 +233,26 @@ def tool_get_governance_file(name: str) -> str:
     path = _resolve_governance_file(name)
     if path and os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+            text = f.read()
+        if not section:
+            return text
+        # Extract the named ## section
+        lines = text.splitlines(keepends=True)
+        result = []
+        in_section = False
+        for line in lines:
+            if line.startswith("## "):
+                heading = line[3:].strip()
+                if heading.lower() == section.lower():
+                    in_section = True
+                    result.append(line)
+                elif in_section:
+                    break
+            elif in_section:
+                result.append(line)
+        if result:
+            return "".join(result)
+        return f"Section not found: {section}"
     return f"Governance file not found: {name}"
 
 
@@ -1248,7 +1267,10 @@ def tool_get_flow_scope(flow_key: str, mode: str = "full") -> str:
 @mcp.tool(
     name="get_flow_state",
     description=(
-        "Read-only one-shot state for a flow's supervisor: flow config "
+        "Read-only one-shot state for a flow's supervisor. mode='compact' "
+        "returns a <=600-char summary (phase, run, signal, queue, session, "
+        "next event); mode='full' (default) returns the complete state. "
+        "Flow config "
         "(artifact root, siblings, target project, supervisor role/mandate/"
         "cadence, cold-start skill, counter), run classification (closed / "
         "executing = LOWEST open run with kickoff evidence / promoted_waiting "
@@ -1261,25 +1283,26 @@ def tool_get_flow_scope(flow_key: str, mode: str = "full") -> str:
         "flow_key -> {error} (Phase 6)"
     ),
 )
-def tool_get_flow_state(flow_key: str) -> str:
+def tool_get_flow_state(flow_key: str, mode: str = "full") -> str:
     try:
-        state = flow_state.collect_state(flow_key, FLOWS_ROOT, DB_PATH)
-        # Cross-check against DPMtF's own reading when it offers one. Its
-        # executing_run resolves the artifact root through Father's live
-        # database rather than DB_PATH, so a disagreement is reported, not
-        # adopted.
-        sv = getattr(flow_state, "_sv", None)
-        helper = getattr(sv, "executing_run", None)
-        if helper is not None and os.path.isdir(FLOWS_ROOT):
-            try:
-                theirs = helper(FLOWS_ROOT, flow_key)
-            except Exception as exc:  # noqa: BLE001 - advisory only
-                theirs = f"unavailable: {type(exc).__name__}: {exc}"
-            if theirs is not None:
-                state["dpmtf_cross_check"] = {
-                    "executing_run": theirs,
-                    "agrees": theirs == state["runs"]["executing"],
-                }
+        state = flow_state.get_flow_state(flow_key, mode=mode, flows_root=FLOWS_ROOT, db_path=DB_PATH)
+        if mode != "compact":
+            # Cross-check against DPMtF's own reading when it offers one. Its
+            # executing_run resolves the artifact root through Father's live
+            # database rather than DB_PATH, so a disagreement is reported, not
+            # adopted.
+            sv = getattr(flow_state, "_sv", None)
+            helper = getattr(sv, "executing_run", None)
+            if helper is not None and os.path.isdir(FLOWS_ROOT):
+                try:
+                    theirs = helper(FLOWS_ROOT, flow_key)
+                except Exception as exc:  # noqa: BLE001 - advisory only
+                    theirs = f"unavailable: {type(exc).__name__}: {exc}"
+                if theirs is not None:
+                    state["dpmtf_cross_check"] = {
+                        "executing_run": theirs,
+                        "agrees": theirs == state["runs"]["executing"],
+                    }
         return json.dumps(state, indent=2)
     except Exception as exc:  # noqa: BLE001
         return _phase6_error(exc)

@@ -996,3 +996,67 @@ def run_detail(flow_key, run_id, flows_root, db_path, include="goal,ledger,end_r
                 root_dir, flows_root, run_name, role_keys,
                 time.time() if now is None else now)
     return out
+
+
+# ── Compact mode (Phase 6 extension) ──────────────────────────
+
+def get_flow_state(flow_key, mode="full", flows_root=None, db_path=None, now=None):
+    """Public entry point for flow state.
+
+    mode="compact" returns a summary dict <= 600 chars JSON-serialized:
+    phase, executing run, last signal, queue depth, session status, next
+    expected event. mode="full" (default) returns the full collect_state dict.
+    """
+    if flows_root is None:
+        flows_root = os.environ.get(
+            "DPMTF_FLOWS_ROOT", os.path.expanduser("~/flows"))
+    if db_path is None:
+        webui = os.environ.get(
+            "DPMTF_WEBUI_ROOT", os.path.expanduser("~/DPMtF-WebUI"))
+        db_path = os.path.join(webui, "databases", "dpmtf.db")
+
+    state = collect_state(flow_key, flows_root, db_path, now=now)
+
+    if mode != "compact":
+        return state
+
+    # Build compact summary
+    ex = state.get("executing_run") or {}
+    runs = state.get("runs") or {}
+    queues = state.get("queues") or {}
+    dispatch = queues.get("dispatch") or {}
+
+    # Last signal: abbreviated event from trace
+    signal_rec = ex.get("last_signal")
+    sig_event = signal_rec.get("event", "?") if signal_rec else "none"
+
+    # Session status
+    if ex.get("stale"):
+        session = "stale"
+    elif runs.get("executing"):
+        session = "active"
+    else:
+        session = "idle"
+
+    # Next expected event
+    ph = state.get("phase", "?")
+    next_map = {
+        "AWAIT_SCOPE": "scope_author",
+        "AUTHOR_DRAFTS": "draft_author",
+        "AWAIT_PROMOTION": "promotion",
+        "KICKOFF_NEXT_RUN": "kickoff",
+        "CHAIN_RUNNING": "result_or_verdict",
+        "VERDICT_READY": "supervisor_action",
+        "STALLED": "intervention",
+        "ALL_RUNS_CLOSED": "new_draft",
+    }
+
+    compact = {
+        "ph": ph,
+        "run": runs.get("executing"),
+        "sig": sig_event,
+        "q": dispatch.get("pending", 0),
+        "sess": session,
+        "next": next_map.get(ph, "?"),
+    }
+    return compact
