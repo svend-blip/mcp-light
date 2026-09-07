@@ -1397,6 +1397,110 @@ async def health(request):  # noqa: ARG001 - Starlette signature
 
 # ── Main ───────────────────────────────────────────────────────
 
+@mcp.tool(
+    name="validate_flow_family",
+    description=(
+        "Validate a two-flow family (PLOOP+ELOOP) against 104_FLOW_CREATION.md: "
+        "both flows present sharing one artifact_root, cold_start_skill and "
+        "supervisor_role set on both, the planning-supervisor and the three ELOOP "
+        "roles wired with a model_source/harness, PLOOP 2 steps / ELOOP 3, "
+        "roles.yaml carrying an entry for each model_allocator role, and the "
+        "cold-start skill present in both the user and repo skill dirs. Returns a "
+        "per-item PASS/FAIL report. Pass the family number, e.g. '1020'."
+    ),
+)
+def tool_validate_flow_family(family: str) -> str:
+    """Structural check of a flow family against the 104_FLOW_CREATION checklist.
+
+    Read-only and dependency-free: queries the whitelisted bridge_* tables,
+    scans roles.yaml as text (no PyYAML), and stats the cold-start skill files.
+    """
+    family = (family or "").strip().rstrip("-")
+    if not family:
+        return "Error: family is required (e.g. '1020')."
+    ploop, eloop = f"{family}-01-PLOOP", f"{family}-02-ELOOP"
+    lines = []
+
+    def check(ok, label, detail=""):
+        lines.append(f"[{'PASS' if ok else 'FAIL'}] {label}" + (f" — {detail}" if detail else ""))
+        return ok
+
+    expected_roles = [
+        f"{family}-planning-supervisor", f"{family}-execution-decomposer",
+        f"{family}-implementer", f"{family}-reviewer",
+    ]
+    roles = {}
+    skill = None
+    conn = _get_db_connection()
+    try:
+        ft = _safe_table("bridge_flows")
+        flows = {r["flow_key"]: r for r in conn.execute(
+            f"SELECT * FROM {ft} WHERE flow_key IN (?, ?)", (ploop, eloop))}
+        have_both = check(ploop in flows and eloop in flows,
+                          "both flows exist", f"found {sorted(flows)}")
+        if have_both:
+            pr, er = flows[ploop], flows[eloop]
+            check(pr["artifact_root"] == er["artifact_root"] == family,
+                  "shared artifact_root == family",
+                  f"{pr['artifact_root']!r}/{er['artifact_root']!r}")
+            check(bool(pr["cold_start_skill"]) and pr["cold_start_skill"] == er["cold_start_skill"],
+                  "cold_start_skill set and equal on both",
+                  f"{pr['cold_start_skill']!r}/{er['cold_start_skill']!r}")
+            skill = pr["cold_start_skill"]
+            sup = f"{family}-planning-supervisor"
+            check(pr["supervisor_role"] == er["supervisor_role"] == sup,
+                  "supervisor_role is the family planning-supervisor on both",
+                  f"{pr['supervisor_role']!r}/{er['supervisor_role']!r}")
+        rt = _safe_table("bridge_roles")
+        # SELECT * + dict() so a trimmed schema (e.g. a test fixture without
+        # the wiring columns) reports a graceful FAIL instead of raising.
+        roles = {dict(r)["role_key"]: dict(r) for r in conn.execute(
+            f"SELECT * FROM {rt} WHERE role_key LIKE ?", (f"{family}-%",))}
+        for rk in expected_roles:
+            r = roles.get(rk)
+            ok = (r is not None and bool(r.get("default_model_source"))
+                  and bool(r.get("default_harness_source")))
+            detail = "MISSING" if r is None else (
+                f"source={r.get('default_model_source')} alias={r.get('default_model_alias')} "
+                f"harness={r.get('default_harness_source')}")
+            check(ok, f"role {rk} present and wired", detail)
+        st = _safe_table("bridge_flow_steps")
+        n_ploop = conn.execute(f"SELECT COUNT(*) FROM {st} WHERE flow_key=?", (ploop,)).fetchone()[0]
+        n_eloop = conn.execute(f"SELECT COUNT(*) FROM {st} WHERE flow_key=?", (eloop,)).fetchone()[0]
+        check(n_ploop == 2, "PLOOP has 2 steps", str(n_ploop))
+        check(n_eloop == 3, "ELOOP has 3 steps", str(n_eloop))
+    finally:
+        conn.close()
+
+    roles_yaml = os.path.join(ALLOCATOR_ROOT, "roles.yaml")
+    if os.path.isfile(roles_yaml):
+        try:
+            with open(roles_yaml, encoding="utf-8") as fh:
+                ry = fh.read()
+        except OSError as exc:
+            ry, _ = "", check(False, "roles.yaml readable", str(exc))
+        for rk in expected_roles:
+            r = roles.get(rk)
+            if r is None or (r.get("default_model_source") or "") == "harness_provider":
+                continue  # codex/native roles carry no roles.yaml entry
+            check(f"\n  {rk}:" in ry, f"roles.yaml has an entry for {rk}")
+    else:
+        check(False, "roles.yaml present", roles_yaml)
+
+    if skill:
+        user_skill = os.path.expanduser(f"~/.claude/skills/{skill}/SKILL.md")
+        repo_skill = os.path.join(WEBUI_ROOT, ".claude", "skills", str(skill), "SKILL.md")
+        check(os.path.isfile(user_skill), f"cold-start skill in user dir (~/.claude/skills/{skill})")
+        check(os.path.isfile(repo_skill), f"cold-start skill in repo (.claude/skills/{skill})")
+
+    passed = sum(1 for ln in lines if ln.startswith("[PASS]"))
+    total = len(lines)
+    header = (f"validate_flow_family({family}): {passed}/{total} checks passed" +
+              ("  ✅ family is complete" if passed == total and total else
+               "  ❌ see FAILs below"))
+    return header + "\n" + "\n".join(lines)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
 
