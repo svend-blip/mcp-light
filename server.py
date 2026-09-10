@@ -16,7 +16,7 @@ import sys
 from mcp.server.fastmcp import FastMCP
 
 # mcp-light — read-only MCP context server for DPMtF.
-# Transport: FastMCP streamable-http. The 29 tool_* functions below are the
+# Transport: FastMCP streamable-http. The 31 tool_* functions below are the
 # same read-only logic from phases 1-6, registered with FastMCP.
 # host/port/streamable_http_path are CONSTRUCTOR kwargs (not run() kwargs) in mcp 1.28.1.
 # Bind address from the environment, loopback by default.
@@ -29,7 +29,7 @@ from mcp.server.fastmcp import FastMCP
 # this instance -- 0.0.0.0 would also expose it on the wifi LAN and on three
 # docker bridges, which is a surface that is easy to forget -- a SECOND
 # instance is started bound to the Tailscale address. The server is entirely
-# read-only (29 tools, no INSERT/UPDATE/DELETE, no writes), so two instances
+# read-only (31 tools, no INSERT/UPDATE/DELETE, no writes), so two instances
 # over one database cannot conflict, and Father's thirteen role configs keep
 # pointing at loopback and are unaffected by anything the worker does.
 #
@@ -254,6 +254,37 @@ def tool_get_governance_file(name: str, section: str = "") -> str:
             return "".join(result)
         return f"Section not found: {section}"
     return f"Governance file not found: {name}"
+
+
+@mcp.tool(name="get_allocator_architecture", description="Explain how the Model Allocator and Harness Allocator work together with DPMtF: the three-layer resolution (BridgeV002 role/step + role->alias binding -> Model Allocator alias->model/endpoint -> Harness Allocator interface launch) and the mandatory configuration-locus rule (DB-driven + frontend-editable; endpoints in committed allocator config; never .env or a runtime tmux setenv; secrets the one .env exception). Source: 14_ARCHITECTURE.md.")
+def tool_get_allocator_architecture() -> str:
+    """Return the Model Allocator / Harness Allocator / DPMtF integration section
+    from 14_ARCHITECTURE.md (single source of truth), plus a pointer to the
+    two-layer role->model binding steps in 22_MODEL_SELECTION.md."""
+    path = _resolve_governance_file("14_ARCHITECTURE.md")
+    if not (path and os.path.isfile(path)):
+        return "14_ARCHITECTURE.md not found in allowed roots."
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    section = "Model Allocator, Harness Allocator, and Configuration Locus"
+    result = []
+    in_section = False
+    for line in text.splitlines(keepends=True):
+        if line.startswith("## "):
+            if line[3:].strip() == section:
+                in_section = True
+                result.append(line)
+            elif in_section:
+                break
+        elif in_section:
+            result.append(line)
+    if not result:
+        return (f"Section '{section}' not found in 14_ARCHITECTURE.md — the file "
+                "may have changed; read 14_ARCHITECTURE.md in full.")
+    result.append(
+        "\n---\nTo bind a model to a role across both layers step by step, see "
+        "22_MODEL_SELECTION.md section 'Binding a Model to a Role'.\n")
+    return "".join(result)
 
 
 @mcp.tool(name="get_required_frontend_impact_block", description="Return the standard Frontend Impact block for output. Pass has_impact=false to get the 'No frontend impact.' variant.")
@@ -1371,7 +1402,7 @@ def tool_list_goal_drafts(flow_key: str) -> str:
 # FastMCP.custom_route (mcp 1.28.1) mounts it on the same Starlette app as
 # /mcp; it needs no MCP handshake and no authorization.
 
-SERVER_VERSION = "1.5.0"
+SERVER_VERSION = "1.6.0"
 SERVER_PHASE = 6
 
 

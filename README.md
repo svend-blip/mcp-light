@@ -140,7 +140,7 @@ curl http://127.0.0.1:9135/health
 ```
 
 ```json
-{"status": "ok", "server": "mcp-light", "version": "1.5.0", "phase": 6, "tools": 29}
+{"status": "ok", "server": "mcp-light", "version": "1.6.0", "phase": 6, "tools": 31}
 ```
 
 ## Configuration
@@ -169,7 +169,7 @@ python3 server.py
 The server prints no banner of its own — FastMCP/uvicorn log lines appear
 as requests arrive. It listens on `http://127.0.0.1:9135/mcp`
 (health: `/health`, a plain GET registered via `FastMCP.custom_route`),
-reads 6 allowed roots, and registers **29 tools**
+reads 6 allowed roots, and registers **31 tools**
 (verify with an MCP `tools/list` call).
 
 ### Stop
