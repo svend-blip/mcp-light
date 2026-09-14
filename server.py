@@ -1539,42 +1539,100 @@ def tool_validate_flow_family(family: str) -> str:
 
 KNOWLEDGE_TIMEOUT_SECONDS = 30
 
+# The knowledge layer is a standalone service (user unit
+# ``knowledge-service.service``) that owns the scope slug rule and the provider
+# behind it. mcp-light is a client of that service: it holds no copy of the
+# rule and no second default URL, so every client -- simple-harness roles,
+# FlowRunner families, DeepSeek Harness -- reads the same registry.
+_SCOPE_CACHE = {}
 
-def knowledge_scope_for_path(path):
-    """Resolve the knowledge scope for a filesystem path.
 
-    Mirrors DPMtF's ``knowledge/scopes.py::scope_for_target``: the lowercased
-    final directory name with trailing slashes stripped
-    (``/home/x/FlowRunner/`` -> ``flowrunner``). The DPMtF checkout itself
-    (compared against ``WEBUI_ROOT`` by resolved path) maps to the configured
-    default scope ``dpmtf-webui``; an empty path lands on that default too.
-    The duplication with DPMtF is deliberate until DPMtF exposes the rule as
-    an endpoint.
+def knowledge_service_base_url():
+    """Base URL of the knowledge service, overridable through the environment."""
+    return os.environ.get(
+        "KNOWLEDGE_SERVICE_URL", "http://127.0.0.1:9140").rstrip("/")
+
+
+def knowledge_service_headers():
+    """Headers for knowledge-service calls; an empty token sends no header."""
+    token = str(os.environ.get("KNOWLEDGE_SERVICE_TOKEN") or "").strip()
+    return {"X-Knowledge-Token": token} if token else {}
+
+
+def _knowledge_scope_for_workspace(workspace):
+    """Resolve ``workspace`` to its scope slug through the service.
+
+    Returns ``(scope, None)`` on success and ``(None, error_dict)`` when the
+    service could not answer, so the caller can report the failure before it
+    makes any search call. The answer is cached per process in
+    ``_SCOPE_CACHE`` keyed by the workspace string: one lookup per repository,
+    however many retrievals a session performs.
     """
-    text = str(path or "").rstrip("/")
+    cached = _SCOPE_CACHE.get(workspace)
+    if cached is not None:
+        return cached, None
     try:
-        if os.path.realpath(text) == os.path.realpath(WEBUI_ROOT):
-            return "dpmtf-webui"
-    except OSError:
-        pass
-    return os.path.basename(text).lower() or "dpmtf-webui"
+        status, payload = _knowledge_unpack(_knowledge_http_get(
+            knowledge_service_base_url() + "/v1/scope-for-path",
+            {"path": workspace}, KNOWLEDGE_TIMEOUT_SECONDS,
+            headers=knowledge_service_headers()))
+    except Exception as exc:
+        return None, {"error": "unreachable", "detail": str(exc)}
+
+    failure = _knowledge_failure(status, payload)
+    if failure:
+        return None, failure
+
+    scope = payload.get("scope") if isinstance(payload, dict) else payload
+    scope = str(scope or "").strip()
+    if not scope:
+        return None, {"error": "not_ready",
+                      "detail": "the knowledge service returned no scope for this path"}
+    _SCOPE_CACHE[workspace] = scope
+    return scope, None
 
 
-def _knowledge_http_get(url, params, timeout):
+def _knowledge_unpack(result):
+    """Normalise a helper return into ``(status, payload)``."""
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    return 200, result
+
+
+def _knowledge_failure(status, payload, resolved_scope=None):
+    """Map a knowledge-service status to the tool's error dict, or ``None``."""
+    if 200 <= status < 300:
+        return None
+    detail = payload.get("detail") if isinstance(payload, dict) else payload
+    if status == 403:
+        error = {"error": "denied"}
+        if resolved_scope:
+            error["scope"] = resolved_scope
+        error["detail"] = detail or "the scope guard denied this request"
+        return error
+    if status == 503:
+        return {"error": "not_ready",
+                "detail": detail or "the knowledge provider is not ready"}
+    return {"error": "unreachable", "detail": f"HTTP {status}"}
+
+
+def _knowledge_http_get(url, params, timeout, headers=None):
     """GET ``url`` with ``params`` via stdlib urllib; return ``(status, payload)``.
 
     ``payload`` is the JSON body parsed into a dict, or ``{"detail": <body>}``
     when the body is not JSON. Parameters that are empty or ``None`` are left
-    out of the query string. Tests replace this helper, so the tool depends on
-    nothing else about the transport; anything raised here becomes the tool's
-    ``unreachable`` error.
+    out of the query string, and ``headers`` carries the caller's knowledge
+    service token when one is configured (empty token, no header). Tests
+    replace this helper, so the tools depend on nothing else about the
+    transport; anything raised here becomes the tool's ``unreachable`` error.
     """
     query = urllib.parse.urlencode(
         {k: v for k, v in dict(params).items() if v not in (None, "")}
     )
     full_url = f"{url}?{query}" if query else url
+    request = urllib.request.Request(full_url, headers=dict(headers or {}))
     try:
-        response = urllib.request.urlopen(full_url, timeout=timeout)
+        response = urllib.request.urlopen(request, timeout=timeout)
     except urllib.error.HTTPError as exc:
         status = exc.code
         body = exc.read().decode("utf-8", errors="replace")
@@ -1588,14 +1646,17 @@ def _knowledge_http_get(url, params, timeout):
         return status, {"detail": body}
 
 
-@mcp.tool(name="knowledge_search", description="Semantic retrieval over the ten repository scopes of DPMtF's knowledge layer, spoken over plain HTTP (provider-neutral). Retrieve before exploring: success returns {scope, provider, count, results:[{path, score, snippet}]}; failures return {error: denied|not_ready|unreachable, detail} (plus scope on denied); disabled layer returns an empty note; never raises. Position fields run_id and handoff_id are forwarded to the endpoint when set; under scope=\"current_repository\" an empty flow_key defaults to the workspace path.")
+@mcp.tool(name="knowledge_search", description="Semantic retrieval over the ten repository scopes of the knowledge service, spoken over plain HTTP (provider-neutral). Retrieve before exploring: success returns {scope, provider, count, results:[{path, score, snippet}]}; failures return {error: denied|not_ready|unreachable, detail} (plus scope on denied); disabled layer returns an empty note; never raises. Position fields run_id and handoff_id are forwarded to the endpoint when set; under scope=\"current_repository\" the workspace resolves through the service's /v1/scope-for-path once per process, and an empty flow_key defaults to the workspace path.")
 def tool_knowledge_search(query: str, scope: str = "current_repository", workspace: str = "", top_k: int = 8, token_budget: int = 4000, agent_role: str = "dsh", flow_key: str = "", run_id: str = "", handoff_id: str = "") -> str:
-    """Answer a semantic query through DPMtF's knowledge endpoint and return JSON.
+    """Answer a semantic query through the knowledge service and return JSON.
 
-    ``run_id`` and ``handoff_id`` are forwarded to the endpoint when set, so
-    each retrieval stays auditable in DPMtF's log. Under
-    ``scope="current_repository"`` an empty ``flow_key`` defaults to the
-    trimmed ``workspace`` path; an explicit ``flow_key`` always wins.
+    The service at ``KNOWLEDGE_SERVICE_URL`` answers ``GET /v1/search``; the
+    configured ``KNOWLEDGE_SERVICE_TOKEN`` rides as ``X-Knowledge-Token`` when
+    set. ``run_id`` and ``handoff_id`` are forwarded when set, so each
+    retrieval stays auditable in the service's log. Under
+    ``scope="current_repository"`` the ``workspace`` path is resolved by the
+    service (one cached call per workspace) and an empty ``flow_key`` defaults
+    to the trimmed ``workspace`` path; an explicit ``flow_key`` always wins.
     """
     query_text = str(query or "").strip()
     if len(query_text) < 2:
@@ -1621,15 +1682,18 @@ def tool_knowledge_search(query: str, scope: str = "current_repository", workspa
         if not location:
             return json.dumps(
                 {"error": "workspace is required to resolve current_repository"}, indent=2)
-        resolved_scope = knowledge_scope_for_path(location)
+        # The service owns the slug rule; this client only asks it once per
+        # workspace and reports a failed lookup before making any search call.
+        resolved_scope, failure = _knowledge_scope_for_workspace(location)
+        if failure:
+            return json.dumps(failure, indent=2)
         if not flow_key_value:
-            # Without an explicit flow_key the trimmed workspace path
-            # (whitespace and trailing slashes stripped, like DPMtF's scope
-            # rule) is the position DPMtF logs, so DSH sessions stay
-            # distinguishable per project. An explicit flow_key wins.
+            # Without an explicit flow_key the trimmed workspace path is the
+            # position the service logs, so DSH sessions stay distinguishable
+            # per project. An explicit flow_key wins.
             flow_key_value = location.rstrip("/")
 
-    base_url = os.environ.get("DPMTF_KNOWLEDGE_BASE_URL", "http://127.0.0.1:9130").rstrip("/")
+    base_url = knowledge_service_base_url()
     params = {
         "q": query_text,
         "scope": resolved_scope,
@@ -1642,26 +1706,16 @@ def tool_knowledge_search(query: str, scope: str = "current_repository", workspa
     }
 
     try:
-        result = _knowledge_http_get(base_url + "/api/knowledge/search", params, KNOWLEDGE_TIMEOUT_SECONDS)
+        result = _knowledge_http_get(base_url + "/v1/search", params, KNOWLEDGE_TIMEOUT_SECONDS,
+                                     headers=knowledge_service_headers())
     except Exception as exc:
         return json.dumps({"error": "unreachable", "detail": str(exc)}, indent=2)
 
-    # The helper contract is (status, payload); a plain payload is treated as OK.
-    if isinstance(result, tuple) and len(result) == 2:
-        status, payload = result
-    else:
-        status, payload = 200, result
+    status, payload = _knowledge_unpack(result)
 
-    if status == 403:
-        detail = payload.get("detail") if isinstance(payload, dict) else payload
-        return json.dumps({"error": "denied", "scope": resolved_scope,
-                           "detail": detail or "the scope guard denied this request"}, indent=2)
-    if status == 503:
-        detail = payload.get("detail") if isinstance(payload, dict) else payload
-        return json.dumps({"error": "not_ready",
-                           "detail": detail or "the knowledge provider is not ready"}, indent=2)
-    if not 200 <= status < 300:
-        return json.dumps({"error": "unreachable", "detail": f"HTTP {status}"}, indent=2)
+    failure = _knowledge_failure(status, payload, resolved_scope)
+    if failure:
+        return json.dumps(failure, indent=2)
 
     if not isinstance(payload, dict):
         payload = {}
@@ -1690,6 +1744,42 @@ def tool_knowledge_search(query: str, scope: str = "current_repository", workspa
         "count": len(results),
         "results": results,
     }, indent=2)
+
+
+@mcp.tool(name="knowledge_scopes", description="List the knowledge scopes the service knows about, from GET /v1/scopes: a JSON array of {scope, provider, status, document_count} so an agent can discover which repositories have memory before it picks a scope. Same error shapes as knowledge_search (denied|not_ready|unreachable with detail); never raises.")
+def tool_knowledge_scopes() -> str:
+    """Return the knowledge service's scope registry as a JSON array.
+
+    ``GET /v1/scopes`` on ``KNOWLEDGE_SERVICE_URL`` answers one entry per known
+    repository with its provider, index status and document count. A missing
+    service comes back as ``{"error": "unreachable", "detail": ...}``, never as
+    an exception, so discovery stays safe on a cold machine.
+    """
+    try:
+        result = _knowledge_http_get(knowledge_service_base_url() + "/v1/scopes", {},
+                                     KNOWLEDGE_TIMEOUT_SECONDS,
+                                     headers=knowledge_service_headers())
+    except Exception as exc:
+        return json.dumps({"error": "unreachable", "detail": str(exc)}, indent=2)
+
+    status, payload = _knowledge_unpack(result)
+
+    failure = _knowledge_failure(status, payload)
+    if failure:
+        return json.dumps(failure, indent=2)
+
+    rows = payload
+    if isinstance(rows, dict):
+        rows = rows.get("scopes") or []
+    if not isinstance(rows, list):
+        rows = []
+
+    scopes = []
+    for row in rows:
+        if isinstance(row, dict):
+            scopes.append(row)
+
+    return json.dumps(scopes, indent=2)
 
 
 if __name__ == "__main__":

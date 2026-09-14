@@ -83,7 +83,7 @@ expect: exit 0
 
 id: TG4
 what: LIVE (reviewer only) — current_repository on the FlowRunner checkout answers with FlowRunner sources through the service, dpmtf-webui is denied for role nobody, and knowledge_scopes lists ten scopes
-run: cd /home/svend/mcp-light-dev && /home/svend/mcp-light/venv/bin/python -c "import json, server as ml; a = json.loads(ml.tool_knowledge_search('How is a FlowApp exported and imported?', scope='current_repository', workspace='/home/svend/FlowRunner', top_k=3)); b = json.loads(ml.tool_knowledge_search('x', scope='dpmtf-webui', agent_role='nobody', top_k=1)); c = json.loads(ml.tool_knowledge_scopes()); ok = a.get('scope') == 'flowrunner' and a.get('count', 0) >= 1 and b.get('error') == 'denied' and isinstance(c, list) and len(c) >= 10; print(json.dumps({'a': a.get('count'), 'b': b.get('error'), 'scopes': len(c) if isinstance(c, list) else c})); raise SystemExit(0 if ok else 1)"
+run: cd /home/svend/mcp-light-dev && /home/svend/mcp-light/venv/bin/python -c "import json, server as ml; a = json.loads(ml.tool_knowledge_search('How is a FlowApp exported and imported?', scope='current_repository', workspace='/home/svend/FlowRunner', top_k=3)); b = json.loads(ml.tool_knowledge_search('who may read this', scope='dpmtf-webui', agent_role='nobody', top_k=1)); c = json.loads(ml.tool_knowledge_scopes()); ok = a.get('scope') == 'flowrunner' and a.get('count', 0) >= 1 and b.get('error') == 'denied' and isinstance(c, list) and len(c) >= 10; print(json.dumps({'a': a.get('count'), 'b': b.get('error'), 'scopes': len(c) if isinstance(c, list) else c})); raise SystemExit(0 if ok else 1)"
 expect: exit 0
 
 id: TG5

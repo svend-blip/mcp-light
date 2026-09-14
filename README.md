@@ -336,7 +336,8 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `get_required_frontend_impact_block` | — | Standard Frontend Impact block for output |
 | `search_context` | `query` | Search results in governance/context files |
 | `search_verdicts` | `query` | Search results in verdict files |
-| `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?`, `run_id?`, `handoff_id?` | Semantic retrieval over DPMtF's knowledge layer over plain HTTP (provider-neutral): `{scope, provider, count, results:[{path, score, snippet}]}` on success, typed `{error, detail}` otherwise; never raises |
+| `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?`, `run_id?`, `handoff_id?` | Semantic retrieval through the knowledge service (`GET /v1/search`) over plain HTTP (provider-neutral): `{scope, provider, count, results:[{path, score, snippet}]}` on success, typed `{error, detail}` otherwise; never raises |
+| `knowledge_scopes` | — | The service's registry from `GET /v1/scopes`: JSON array of `{scope, provider, status, document_count}` — which repositories have memory |
 
 ### Phase 2 — Frontend context
 
@@ -397,20 +398,28 @@ the flows root come back as `{"error": ...}`; nothing raises.
 
 ### knowledge_search
 
-Semantic retrieval over the ten repository scopes of DPMtF's knowledge
-layer, spoken over plain HTTP (`GET /api/knowledge/search` on the DPMtF
-instance, base URL from `DPMTF_KNOWLEDGE_BASE_URL`, default
-`http://127.0.0.1:9130`). The tool is provider-neutral: it knows nothing
-about the search provider behind that endpoint — retrieve before exploring.
+Semantic retrieval over the ten repository scopes of the knowledge layer,
+spoken over plain HTTP to the standalone knowledge service
+(`GET <base>/v1/search`). The tool is provider-neutral: it knows nothing about
+the search provider behind that endpoint — retrieve before exploring.
 
-Scope rule (mirrors DPMtF's `knowledge/scopes.py::scope_for_target`, in
-`knowledge_scope_for_path`): `scope="current_repository"` resolves from
-`workspace` as the lowercased final directory name with trailing slashes
-stripped (`/home/x/FlowRunner/` → `flowrunner`); the DPMtF checkout itself
-(compared by resolved path) maps to `dpmtf-webui`. An empty `workspace` with
-`current_repository` returns `{"error": "workspace is required to resolve
-current_repository"}` without making a call. Any other `scope` value passes
-through unchanged.
+Base URL comes from `KNOWLEDGE_SERVICE_URL` (default
+`http://127.0.0.1:9140`), the shared token from `KNOWLEDGE_SERVICE_TOKEN`,
+sent as `X-Knowledge-Token`; an empty token sends no header. The service also
+owns the scope slug rule.
+
+Scope rule: under `scope="current_repository"` the `workspace` path is
+resolved by the service itself — one
+`GET <base>/v1/scope-for-path?path=<workspace>` call per process, cached per
+workspace string. Any other `scope` value passes through unchanged. An empty
+`workspace` with `current_repository` returns `{"error": "workspace is required
+to resolve current_repository"}` without making a call. When the service is
+unreachable the lookup fails first, so the tool answers
+`{"error": "unreachable", "detail": …}` before any search is attempted.
+
+`knowledge_scopes` is the discovery half: `GET <base>/v1/scopes` as a JSON
+array of `{scope, provider, status, document_count}`, so an agent can see which
+repositories have memory before picking a scope. Same error shapes.
 
 Shapes: success is `{"scope", "provider", "count", "results": [{"path",
 "score", "snippet"}]}` with each snippet the result content cut to 600
@@ -422,16 +431,16 @@ tool never raises. Bounds are clamped before the call (`top_k` 1–20,
 `token_budget` 200–12000); a query shorter than two characters returns
 `{"error": "query too short"}`.
 
-Position fields make each retrieval auditable in DPMtF's log: `run_id` and
-`handoff_id` are forwarded to the endpoint when set (omitted from the query
-string when empty, like the other optional parameters). Under
+Position fields make each retrieval auditable in the service's log: `run_id`
+and `handoff_id` are forwarded when set (omitted from the query string when
+empty, like the other optional parameters). Under
 `scope="current_repository"` an empty `flow_key` defaults to the trimmed
 `workspace` path, so DSH sessions stay distinguishable per project; an
 explicit `flow_key` always wins.
 
-simple-harness roles need `knowledge_search` on their tool allowlist, and
-DeepSeek Harness reaches it through its MCP client — both are configured
-outside this repository.
+simple-harness roles need `knowledge_search` (and `knowledge_scopes`) on their
+tool allowlist, and DeepSeek Harness reaches them through its MCP client — both
+are configured outside this repository.
 
 **knowledge-first skill.** `skills/knowledge-first/SKILL.md` teaches DSH to
 retrieve before exploring: read `status` + `next_goal` from scope-mcp, then
