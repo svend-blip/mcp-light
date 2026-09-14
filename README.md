@@ -323,7 +323,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 ---
 
-## Available Tools (29)
+## Available Tools (30)
 
 ### Phase 1 — Context retrieval
 
@@ -336,6 +336,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `get_required_frontend_impact_block` | — | Standard Frontend Impact block for output |
 | `search_context` | `query` | Search results in governance/context files |
 | `search_verdicts` | `query` | Search results in verdict files |
+| `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?` | Semantic retrieval over DPMtF's knowledge layer over plain HTTP (provider-neutral): `{scope, provider, count, results:[{path, score, snippet}]}` on success, typed `{error, detail}` otherwise; never raises |
 
 ### Phase 2 — Frontend context
 
@@ -393,6 +394,37 @@ the flows root come back as `{"error": ...}`; nothing raises.
 | `get_flow_state` | `flow_key` | Flow config (artifact root, siblings, target project, supervisor role/mandate/cadence, cold-start skill, id counters); run classification — `closed`, `executing` (the **lowest** open run with kickoff evidence: a numeric first-handoff floor or a ledger heading saying "opened"; after a bulk promotion the newest GOAL.md is not the run being worked), `promoted_waiting`, `anomalies`; the executing run's owned handoffs, current deliverables, last trace signal, last movement and staleness; GOAL-DRAFTs with promotability; dispatch/materialize queue counts + last 5 rows; trace tail for the flow's roles; `phase` ∈ `AWAIT_SCOPE`, `AUTHOR_DRAFTS`, `AWAIT_PROMOTION`, `KICKOFF_NEXT_RUN`, `CHAIN_RUNNING`, `VERDICT_READY`, `STALLED`, `ALL_RUNS_CLOSED` with a one-line `assessment`. When DPMtF's own `supervisor_state.executing_run` is importable its answer is reported under `dpmtf_cross_check` |
 | `get_run` | `flow_key`, `run_id`, `include?` (`goal,ledger,end_report`; also `draft`, `backlog`), `ledger_tail_entries?` | One run: status (`closed`/`executing`/`promoted_waiting`/`draft`/`anomaly`/`missing`), artefact files, first handoff id, the handoffs it owns (bounded by the next run's floor) with deliverables and last trace signal, testgoals parse status, and the requested file contents; `ledger_tail_entries=N` returns only the last N `## ` ledger entries |
 | `list_goal_drafts` | `flow_key` | Drafts from both `goals/{N}-GOAL-DRAFT.md` and `runs/NNN/GOAL-DRAFT.md` with testgoals parse status (`ok`/`malformed`/`absent`, via DPMtF's `check_testgoals.parse_block`, nothing executed) and `promotable` = whether `promote-goal` would accept it (refused when `GOAL.md` or `END-REPORT.md` exists or the block is malformed; no block = promotable with a warning) |
+
+### knowledge_search
+
+Semantic retrieval over the ten repository scopes of DPMtF's knowledge
+layer, spoken over plain HTTP (`GET /api/knowledge/search` on the DPMtF
+instance, base URL from `DPMTF_KNOWLEDGE_BASE_URL`, default
+`http://127.0.0.1:9130`). The tool is provider-neutral: it knows nothing
+about the search provider behind that endpoint — retrieve before exploring.
+
+Scope rule (mirrors DPMtF's `knowledge/scopes.py::scope_for_target`, in
+`knowledge_scope_for_path`): `scope="current_repository"` resolves from
+`workspace` as the lowercased final directory name with trailing slashes
+stripped (`/home/x/FlowRunner/` → `flowrunner`); the DPMtF checkout itself
+(compared by resolved path) maps to `dpmtf-webui`. An empty `workspace` with
+`current_repository` returns `{"error": "workspace is required to resolve
+current_repository"}` without making a call. Any other `scope` value passes
+through unchanged.
+
+Shapes: success is `{"scope", "provider", "count", "results": [{"path",
+"score", "snippet"}]}` with each snippet the result content cut to 600
+characters; a disabled layer returns `{"scope", "count": 0, "results": [],
+"note": "knowledge retrieval is disabled in DPMtF"}`. Errors: HTTP 403 →
+`{"error": "denied", "scope", "detail"}`; HTTP 503 → `{"error": "not_ready",
+"detail"}`; any other failure → `{"error": "unreachable", "detail"}` — the
+tool never raises. Bounds are clamped before the call (`top_k` 1–20,
+`token_budget` 200–12000); a query shorter than two characters returns
+`{"error": "query too short"}`.
+
+simple-harness roles need `knowledge_search` on their tool allowlist, and
+DeepSeek Harness reaches it through its MCP client — both are configured
+outside this repository.
 
 ---
 

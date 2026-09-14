@@ -12,6 +12,9 @@ import os
 import re
 import sqlite3
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from mcp.server.fastmcp import FastMCP
 
@@ -1530,6 +1533,149 @@ def tool_validate_flow_family(family: str) -> str:
               ("  ✅ family is complete" if passed == total and total else
                "  ❌ see FAILs below"))
     return header + "\n" + "\n".join(lines)
+
+
+# ── Knowledge retrieval (provider-neutral HTTP) ──────────────
+
+KNOWLEDGE_TIMEOUT_SECONDS = 30
+
+
+def knowledge_scope_for_path(path):
+    """Resolve the knowledge scope for a filesystem path.
+
+    Mirrors DPMtF's ``knowledge/scopes.py::scope_for_target``: the lowercased
+    final directory name with trailing slashes stripped
+    (``/home/x/FlowRunner/`` -> ``flowrunner``). The DPMtF checkout itself
+    (compared against ``WEBUI_ROOT`` by resolved path) maps to the configured
+    default scope ``dpmtf-webui``; an empty path lands on that default too.
+    The duplication with DPMtF is deliberate until DPMtF exposes the rule as
+    an endpoint.
+    """
+    text = str(path or "").rstrip("/")
+    try:
+        if os.path.realpath(text) == os.path.realpath(WEBUI_ROOT):
+            return "dpmtf-webui"
+    except OSError:
+        pass
+    return os.path.basename(text).lower() or "dpmtf-webui"
+
+
+def _knowledge_http_get(url, params, timeout):
+    """GET ``url`` with ``params`` via stdlib urllib; return ``(status, payload)``.
+
+    ``payload`` is the JSON body parsed into a dict, or ``{"detail": <body>}``
+    when the body is not JSON. Parameters that are empty or ``None`` are left
+    out of the query string. Tests replace this helper, so the tool depends on
+    nothing else about the transport; anything raised here becomes the tool's
+    ``unreachable`` error.
+    """
+    query = urllib.parse.urlencode(
+        {k: v for k, v in dict(params).items() if v not in (None, "")}
+    )
+    full_url = f"{url}?{query}" if query else url
+    try:
+        response = urllib.request.urlopen(full_url, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        body = exc.read().decode("utf-8", errors="replace")
+    else:
+        with response:
+            status = response.status
+            body = response.read().decode("utf-8", errors="replace")
+    try:
+        return status, json.loads(body)
+    except ValueError:
+        return status, {"detail": body}
+
+
+@mcp.tool(name="knowledge_search", description="Semantic retrieval over the ten repository scopes of DPMtF's knowledge layer, spoken over plain HTTP (provider-neutral). Retrieve before exploring: success returns {scope, provider, count, results:[{path, score, snippet}]}; failures return {error: denied|not_ready|unreachable, detail} (plus scope on denied); disabled layer returns an empty note; never raises.")
+def tool_knowledge_search(query: str, scope: str = "current_repository", workspace: str = "", top_k: int = 8, token_budget: int = 4000, agent_role: str = "dsh", flow_key: str = "") -> str:
+    """Answer a semantic query through DPMtF's knowledge endpoint and return JSON."""
+    query_text = str(query or "").strip()
+    if len(query_text) < 2:
+        return json.dumps({"error": "query too short"}, indent=2)
+
+    try:
+        top_k_value = int(top_k)
+    except (TypeError, ValueError):
+        top_k_value = 8
+    top_k_value = max(1, min(20, top_k_value))
+
+    try:
+        budget_value = int(token_budget)
+    except (TypeError, ValueError):
+        budget_value = 4000
+    budget_value = max(200, min(12000, budget_value))
+
+    scope_name = str(scope or "").strip() or "current_repository"
+    if scope_name == "current_repository":
+        location = str(workspace or "").strip()
+        if not location:
+            return json.dumps(
+                {"error": "workspace is required to resolve current_repository"}, indent=2)
+        resolved_scope = knowledge_scope_for_path(location)
+    else:
+        resolved_scope = scope_name
+
+    base_url = os.environ.get("DPMTF_KNOWLEDGE_BASE_URL", "http://127.0.0.1:9130").rstrip("/")
+    params = {
+        "q": query_text,
+        "scope": resolved_scope,
+        "top_k": top_k_value,
+        "token_budget": budget_value,
+        "agent_role": str(agent_role or "").strip() or "dsh",
+        "flow_key": str(flow_key or "").strip(),
+    }
+
+    try:
+        result = _knowledge_http_get(base_url + "/api/knowledge/search", params, KNOWLEDGE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        return json.dumps({"error": "unreachable", "detail": str(exc)}, indent=2)
+
+    # The helper contract is (status, payload); a plain payload is treated as OK.
+    if isinstance(result, tuple) and len(result) == 2:
+        status, payload = result
+    else:
+        status, payload = 200, result
+
+    if status == 403:
+        detail = payload.get("detail") if isinstance(payload, dict) else payload
+        return json.dumps({"error": "denied", "scope": resolved_scope,
+                           "detail": detail or "the scope guard denied this request"}, indent=2)
+    if status == 503:
+        detail = payload.get("detail") if isinstance(payload, dict) else payload
+        return json.dumps({"error": "not_ready",
+                           "detail": detail or "the knowledge provider is not ready"}, indent=2)
+    if not 200 <= status < 300:
+        return json.dumps({"error": "unreachable", "detail": f"HTTP {status}"}, indent=2)
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if not payload.get("enabled", True):
+        return json.dumps({
+            "scope": resolved_scope,
+            "count": 0,
+            "results": [],
+            "note": "knowledge retrieval is disabled in DPMtF",
+        }, indent=2)
+
+    results = []
+    for item in payload.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        results.append({
+            "path": item.get("path"),
+            "score": item.get("score"),
+            "snippet": str(item.get("content") or "")[:600],
+        })
+
+    return json.dumps({
+        "scope": resolved_scope,
+        "provider": payload.get("provider"),
+        "count": len(results),
+        "results": results,
+    }, indent=2)
 
 
 if __name__ == "__main__":
