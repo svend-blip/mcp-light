@@ -323,7 +323,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 ---
 
-## Available Tools (30)
+## Available Tools (32)
 
 ### Phase 1 — Context retrieval
 
@@ -338,6 +338,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `search_verdicts` | `query` | Search results in verdict files |
 | `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?`, `run_id?`, `handoff_id?`, `cross_repo?`, `evidence_level?`, `include_history?` | Semantic retrieval through the knowledge service (`GET /v1/search`) over plain HTTP (provider-neutral). Default (`cross_repo: true`) spans three scopes — `ecosystem`, `experience`, then the repository scope — splitting `token_budget` 60 % / 20 % / 20 % and flowing an unused learning share back to the repository call: `{scope, provider, count, results:[{scope, path, score, snippet, metadata}], scopes_searched:[{scope, status, count}]}` on success, typed `{error, detail}` otherwise (`denied`, `unknown_scope`, `not_ready`, `unreachable`); `cross_repo: false` makes exactly one repository call; never raises |
 | `knowledge_scopes` | — | The service's registry from `GET /v1/scopes`: JSON array of `{scope, provider, status, document_count}` — which repositories have memory |
+| `knowledge_learning` | `view?` (`admitted`/`history`/`drafts`), `pending_only?`, `family?` | Read-only inventory of closed-run learning from `GET /v1/learning` (`history=true` for superseded/retracted) or `GET /v1/learning/drafts` (`pending=true` for still-pending ones): `{view, count, artifacts}` — `{view, count, drafts}` for drafts — rows passed through unchanged, `family` filtered client-side; typed `{error, detail}` (`denied`, `unknown_scope`, `not_ready`, `unreachable`, `unknown view`); never raises |
 
 ### Phase 2 — Frontend context
 
@@ -483,6 +484,34 @@ before trusting an experience hit, to pass `include_history: true` when a
 conclusion looks outdated, and to read `scopes_searched` when the answer is
 thin. The reviewer installs it into
 `~/.agents/skills/knowledge-first/` outside this repository.
+
+### knowledge_learning
+
+The inventory half of the same service: what closed runs have already learned,
+what was later superseded, and what still waits for admission. One read-only GET
+per call through the same transport seam and the same token header — no scope
+guard is involved, and nothing is cached in `_SCOPE_CACHE`.
+
+`view` picks the route. `admitted` (the default) is `GET <base>/v1/learning`:
+one object per admitted artifact with `family`, `run`, `topic`,
+`evidence_level`, `confidence`, `admitted_by` and `supersedes`, in the service's
+own family-then-run order. `history` is the same route with `history=true`, so
+the superseded and retracted artifacts come back with their `superseded_by` and
+`retracted_at`. `drafts` is `GET <base>/v1/learning/drafts`, listing the
+`LEARNING-DRAFT.yaml` files under the runs root with `run_status`, `admitted`,
+`valid` and `violations`; `pending_only: true` adds `pending=true` and keeps the
+drafts no supervisor has admitted yet. Any other `view` answers
+`{"error": "unknown view", "detail": …}` immediately, without a call.
+
+Success is `{"view", "count", "artifacts"}` — `drafts` instead of `artifacts`
+for the drafts view — with `count` the number of rows returned and the rows
+passed through exactly as the service wrote them. `family` filters those rows
+here rather than in the query string, so the route and its params stay exactly
+as listed; matching is exact against the row's `family` field, and `count`
+describes what survives the filter. Errors keep the `knowledge_search` shapes —
+403 → `denied`, 404 → `unknown_scope`, 503 → `not_ready`, any other transport
+failure or a raised seam → `unreachable` — and the tool never raises, so a cold
+machine still gets an answer it can act on.
 
 ---
 

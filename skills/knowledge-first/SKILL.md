@@ -14,7 +14,15 @@ right documents before any grep or directory walk.
 1. Call scope-mcp `status`, then `next_goal`; take the current goal's id and
    title. Without a scope-mcp project, use the user's task sentence as the
    query and `handoff_id: ""`.
-2. Call `knowledge_search` with `query` set to the goal title (or the task
+2. Before starting a goal that repeats an earlier family's work, call
+   `knowledge_learning` with `view: "admitted"` and `family` set to that family
+   (for example `9000`) to see what was already concluded: the answer lists the
+   admitted artifacts of that family — `family`, `run`, `topic`,
+   `evidence_level`, `confidence`, `admitted_by` — oldest run first. When acting
+   as a supervisor, ask for the pending ones instead: `view: "drafts"` with
+   `pending_only: true` lists the run drafts still awaiting admission. Rows come
+   back unchanged; an `{"error": ...}` answer is a note, not a stop.
+3. Call `knowledge_search` with `query` set to the goal title (or the task
    sentence), `scope: "current_repository"`, `workspace` set to the current
    workspace path, `run_id` set to the first 60 characters of the scope-mcp
    objective, `handoff_id` set to the goal id, and `top_k: 8`. Leave
@@ -22,7 +30,7 @@ right documents before any grep or directory walk.
    `ecosystem` and `experience` (60 % / 20 % / 20 % of the token budget, an
    unused learning share flowing back to the repository call). Pass
    `cross_repo: false` only when the task is about this repository alone.
-3. Read the returned `results`, ordered repository → ecosystem → experience;
+4. Read the returned `results`, ordered repository → ecosystem → experience;
    open at most the three highest-scoring `path`s with the ordinary file tool
    before any grep or directory walk. Before trusting an `experience` hit,
    read its `metadata.evidence_level` — strongest first: `tests`,

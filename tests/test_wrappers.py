@@ -26,9 +26,35 @@ import server as ml  # noqa: E402
 class TestGetKickoffPacket:
     """get_kickoff_packet wrapper tests."""
 
-    def test_refusal_surfaces_exit_2(self):
-        """9000-02-ELOOP run 999 must surface exit-2 refusal (predecessor has no END-REPORT)."""
+    def test_refusal_surfaces_exit_2(self, tmp_path, monkeypatch):
+        """kickoff_packet.py exit 2 must surface as a refusal with its reason.
+
+        The wrapper mapping is what this file owns, so the script call is
+        stubbed against a temporary DPMtF root: the refusal then depends on the
+        stub instead of whichever run the live flows root happens to have
+        closed by now.
+        """
+        script = tmp_path / "scripts" / "bridgeV002" / "kickoff_packet.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("# stub target for the wrapper\n", encoding="utf-8")
+        monkeypatch.setattr(ml, "_dpmtf_root", lambda: str(tmp_path))
+
+        seen = {}
+
+        class Completed:
+            returncode = 2
+            stdout = ""
+            stderr = "predecessor run has no END-REPORT.md"
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = [str(part) for part in cmd]
+            return Completed()
+
+        monkeypatch.setattr(ml._subprocess, "run", fake_run)
+
         result = ml.tool_get_kickoff_packet("9000-02-ELOOP", 999)
+        assert "--flow" in seen["cmd"] and "9000-02-ELOOP" in seen["cmd"]
+        assert seen["cmd"][-1] == "999"
         parsed = json.loads(result)
         assert "error" in parsed, f"Expected error key in refusal response, got: {result}"
         assert parsed["error"] == "refused", (

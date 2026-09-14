@@ -1937,6 +1937,78 @@ def tool_knowledge_scopes() -> str:
     return json.dumps(scopes, indent=2)
 
 
+LEARNING_VIEWS = ("admitted", "history", "drafts")
+
+
+def _learning_rows(payload, view):
+    """Pull the artifact rows out of a learning answer.
+
+    The service answers ``/v1/learning`` with either a bare list or a wrapped
+    object; ``/v1/learning/drafts`` always wraps in ``{"drafts": [...]}``. Rows
+    pass through unchanged — this helper only finds the list, never edits it.
+    """
+    rows = payload
+    if isinstance(rows, dict):
+        rows = rows.get("drafts" if view == "drafts" else "artifacts")
+        if rows is None:
+            rows = payload.get("artifacts") if view == "drafts" else payload.get("drafts")
+    if not isinstance(rows, list):
+        rows = []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+@mcp.tool(name="knowledge_learning", description="Read-only inventory of what closed runs have learned, straight from the knowledge service's learning routes: view=\"admitted\" (GET /v1/learning) lists admitted artifacts with family, run, topic, evidence_level, confidence, admitted_by and supersedes; view=\"history\" (?history=true) adds the superseded and retracted ones with superseded_by and retracted_at; view=\"drafts\" (GET /v1/learning/drafts, pending_only=true for ?pending=true) lists the LEARNING-DRAFT.yaml files under the runs root with their run status, admission and validation state. Answers {view, count, artifacts} (or {view, count, drafts} for drafts) with rows passed through unchanged; family filters the returned rows client-side. Errors are reported, never raised: {error: denied|unknown_scope|not_ready|unreachable, detail} from the service, {error: unknown view, detail} for a view outside the three without any call.")
+def tool_knowledge_learning(view: str = "admitted", pending_only: bool = False,
+                            family: str = "") -> str:
+    """List the knowledge service's learning inventory over one GET.
+
+    ``view`` picks the route: ``admitted`` -> ``GET /v1/learning``,
+    ``history`` -> the same route with ``history=true``, ``drafts`` ->
+    ``GET /v1/learning/drafts`` (plus ``pending=true`` when ``pending_only``).
+    Anything else is answered immediately, without touching the transport. The
+    service owns the reading and sorting; this tool only passes rows through,
+    optionally keeping the ones whose ``family`` matches, so the count always
+    describes what came back. Failures come back as the same typed error dicts
+    as ``knowledge_search`` and never raise.
+    """
+    name = str(view or "").strip().lower() or "admitted"
+    if name not in LEARNING_VIEWS:
+        return json.dumps({
+            "error": "unknown view",
+            "detail": f"expected one of {', '.join(LEARNING_VIEWS)}",
+        }, indent=2)
+
+    params = {}
+    if name == "history":
+        params["history"] = "true"
+    elif name == "drafts" and _flag_enabled(pending_only, False):
+        params["pending"] = "true"
+
+    path = "/v1/learning/drafts" if name == "drafts" else "/v1/learning"
+    try:
+        result = _knowledge_http_get(knowledge_service_base_url() + path, params,
+                                     KNOWLEDGE_TIMEOUT_SECONDS,
+                                     headers=knowledge_service_headers())
+    except Exception as exc:
+        return json.dumps({"error": "unreachable", "detail": str(exc)}, indent=2)
+
+    status, payload = _knowledge_unpack(result)
+
+    failure = _knowledge_failure(status, payload)
+    if failure:
+        return json.dumps(failure, indent=2)
+
+    rows = _learning_rows(payload, name)
+
+    wanted = str(family or "").strip()
+    if wanted:
+        rows = [row for row in rows if str(row.get("family") or "") == wanted]
+
+    answer = {"view": name, "count": len(rows)}
+    answer["drafts" if name == "drafts" else "artifacts"] = rows
+    return json.dumps(answer, indent=2)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
 
