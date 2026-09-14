@@ -1588,9 +1588,15 @@ def _knowledge_http_get(url, params, timeout):
         return status, {"detail": body}
 
 
-@mcp.tool(name="knowledge_search", description="Semantic retrieval over the ten repository scopes of DPMtF's knowledge layer, spoken over plain HTTP (provider-neutral). Retrieve before exploring: success returns {scope, provider, count, results:[{path, score, snippet}]}; failures return {error: denied|not_ready|unreachable, detail} (plus scope on denied); disabled layer returns an empty note; never raises.")
-def tool_knowledge_search(query: str, scope: str = "current_repository", workspace: str = "", top_k: int = 8, token_budget: int = 4000, agent_role: str = "dsh", flow_key: str = "") -> str:
-    """Answer a semantic query through DPMtF's knowledge endpoint and return JSON."""
+@mcp.tool(name="knowledge_search", description="Semantic retrieval over the ten repository scopes of DPMtF's knowledge layer, spoken over plain HTTP (provider-neutral). Retrieve before exploring: success returns {scope, provider, count, results:[{path, score, snippet}]}; failures return {error: denied|not_ready|unreachable, detail} (plus scope on denied); disabled layer returns an empty note; never raises. Position fields run_id and handoff_id are forwarded to the endpoint when set; under scope=\"current_repository\" an empty flow_key defaults to the workspace path.")
+def tool_knowledge_search(query: str, scope: str = "current_repository", workspace: str = "", top_k: int = 8, token_budget: int = 4000, agent_role: str = "dsh", flow_key: str = "", run_id: str = "", handoff_id: str = "") -> str:
+    """Answer a semantic query through DPMtF's knowledge endpoint and return JSON.
+
+    ``run_id`` and ``handoff_id`` are forwarded to the endpoint when set, so
+    each retrieval stays auditable in DPMtF's log. Under
+    ``scope="current_repository"`` an empty ``flow_key`` defaults to the
+    trimmed ``workspace`` path; an explicit ``flow_key`` always wins.
+    """
     query_text = str(query or "").strip()
     if len(query_text) < 2:
         return json.dumps({"error": "query too short"}, indent=2)
@@ -1608,14 +1614,20 @@ def tool_knowledge_search(query: str, scope: str = "current_repository", workspa
     budget_value = max(200, min(12000, budget_value))
 
     scope_name = str(scope or "").strip() or "current_repository"
+    flow_key_value = str(flow_key or "").strip()
+    resolved_scope = scope_name
+    location = str(workspace or "").strip()
     if scope_name == "current_repository":
-        location = str(workspace or "").strip()
         if not location:
             return json.dumps(
                 {"error": "workspace is required to resolve current_repository"}, indent=2)
         resolved_scope = knowledge_scope_for_path(location)
-    else:
-        resolved_scope = scope_name
+        if not flow_key_value:
+            # Without an explicit flow_key the trimmed workspace path
+            # (whitespace and trailing slashes stripped, like DPMtF's scope
+            # rule) is the position DPMtF logs, so DSH sessions stay
+            # distinguishable per project. An explicit flow_key wins.
+            flow_key_value = location.rstrip("/")
 
     base_url = os.environ.get("DPMTF_KNOWLEDGE_BASE_URL", "http://127.0.0.1:9130").rstrip("/")
     params = {
@@ -1624,7 +1636,9 @@ def tool_knowledge_search(query: str, scope: str = "current_repository", workspa
         "top_k": top_k_value,
         "token_budget": budget_value,
         "agent_role": str(agent_role or "").strip() or "dsh",
-        "flow_key": str(flow_key or "").strip(),
+        "flow_key": flow_key_value,
+        "run_id": str(run_id or "").strip(),
+        "handoff_id": str(handoff_id or "").strip(),
     }
 
     try:

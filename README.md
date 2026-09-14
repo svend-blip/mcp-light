@@ -336,7 +336,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `get_required_frontend_impact_block` | — | Standard Frontend Impact block for output |
 | `search_context` | `query` | Search results in governance/context files |
 | `search_verdicts` | `query` | Search results in verdict files |
-| `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?` | Semantic retrieval over DPMtF's knowledge layer over plain HTTP (provider-neutral): `{scope, provider, count, results:[{path, score, snippet}]}` on success, typed `{error, detail}` otherwise; never raises |
+| `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?`, `run_id?`, `handoff_id?` | Semantic retrieval over DPMtF's knowledge layer over plain HTTP (provider-neutral): `{scope, provider, count, results:[{path, score, snippet}]}` on success, typed `{error, detail}` otherwise; never raises |
 
 ### Phase 2 — Frontend context
 
@@ -422,9 +422,23 @@ tool never raises. Bounds are clamped before the call (`top_k` 1–20,
 `token_budget` 200–12000); a query shorter than two characters returns
 `{"error": "query too short"}`.
 
+Position fields make each retrieval auditable in DPMtF's log: `run_id` and
+`handoff_id` are forwarded to the endpoint when set (omitted from the query
+string when empty, like the other optional parameters). Under
+`scope="current_repository"` an empty `flow_key` defaults to the trimmed
+`workspace` path, so DSH sessions stay distinguishable per project; an
+explicit `flow_key` always wins.
+
 simple-harness roles need `knowledge_search` on their tool allowlist, and
 DeepSeek Harness reaches it through its MCP client — both are configured
 outside this repository.
+
+**knowledge-first skill.** `skills/knowledge-first/SKILL.md` teaches DSH to
+retrieve before exploring: read `status` + `next_goal` from scope-mcp, then
+call `knowledge_search` carrying the goal id (`handoff_id`), the objective
+(`run_id`) and the workspace, then open at most the three highest-scoring
+paths before any grep. The reviewer installs it into
+`~/.agents/skills/knowledge-first/` outside this repository.
 
 ---
 

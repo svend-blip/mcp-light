@@ -161,3 +161,58 @@ def test_bounds_are_clamped_before_the_call(monkeypatch):
     too_short = json.loads(ml.tool_knowledge_search("q", workspace="/tmp/x/FlowRunner"))
     assert too_short == {"error": "query too short"}
     assert len(calls) == 3
+
+
+def test_run_and_handoff_ids_are_forwarded(monkeypatch):
+    """2.1: run_id and handoff_id reach the params; empty ones stay empty."""
+    calls = []
+
+    def fake_get(url, params, timeout):
+        calls.append(dict(params))
+        return 200, {"enabled": True, "provider": "leann", "results": []}
+
+    monkeypatch.setattr(ml, "_knowledge_http_get", fake_get)
+
+    ml.tool_knowledge_search("how does export work", workspace="/home/svend/FlowRunner",
+                             run_id="trial-1b", handoff_id="g2")
+    ml.tool_knowledge_search("how does export work", workspace="/home/svend/FlowRunner")
+
+    assert calls[0]["run_id"] == "trial-1b"
+    assert calls[0]["handoff_id"] == "g2"
+    # Empty ids are left empty here; the helper omits empty params from the
+    # query string, so they never reach the endpoint.
+    assert calls[1]["run_id"] == ""
+    assert calls[1]["handoff_id"] == ""
+
+
+def test_flow_key_defaults_to_the_workspace_for_current_repository(monkeypatch):
+    """2.1: empty flow_key under current_repository -> trimmed workspace path."""
+    calls = []
+
+    def fake_get(url, params, timeout):
+        calls.append(dict(params))
+        return 200, {"enabled": True, "provider": "leann", "results": []}
+
+    monkeypatch.setattr(ml, "_knowledge_http_get", fake_get)
+
+    ml.tool_knowledge_search("export flowapp", workspace="/home/svend/FlowRunner/")
+
+    assert calls[0]["flow_key"] == "/home/svend/FlowRunner"
+    assert calls[0]["scope"] == "flowrunner"
+
+
+def test_explicit_flow_key_wins_over_the_workspace_default(monkeypatch):
+    """2.1: a non-empty flow_key is forwarded as-is, workspace default aside."""
+    calls = []
+
+    def fake_get(url, params, timeout):
+        calls.append(dict(params))
+        return 200, {"enabled": True, "provider": "leann", "results": []}
+
+    monkeypatch.setattr(ml, "_knowledge_http_get", fake_get)
+
+    ml.tool_knowledge_search("export flowapp", workspace="/home/svend/FlowRunner",
+                             flow_key="9000-02-ELOOP")
+
+    assert calls[0]["flow_key"] == "9000-02-ELOOP"
+    assert calls[0]["scope"] == "flowrunner"

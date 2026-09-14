@@ -111,7 +111,7 @@ expect: exit 0
 
 id: TG6
 what: LIVE (reviewer only) — a call with ids is logged by DPMtF with role dsh, the workspace as flow_key and the goal id
-run: cd /home/svend/mcp-light-dev && /home/svend/mcp-light/venv/bin/python -c "import json, server as ml; r = json.loads(ml.tool_knowledge_search('How is a FlowApp exported and imported?', scope='current_repository', workspace='/home/svend/FlowRunner', run_id='trial-1b', handoff_id='tg6', top_k=2)); raise SystemExit(0 if r.get('count', 0) >= 1 else 1)" && test "$(sqlite3 /home/svend/DPMtF-WebUI/databases/dpmtf.db "select count(*) from knowledge_retrieval_log where agent_role='dsh' and flow_key='/home/svend/FlowRunner' and handoff_id='tg6'")" -ge 1
+run: cd /home/svend/mcp-light-dev && /home/svend/mcp-light/venv/bin/python -c "import json, server as ml; r = json.loads(ml.tool_knowledge_search('How is a FlowApp exported and imported?', scope='current_repository', workspace='/home/svend/FlowRunner', run_id='trial-1b', handoff_id='tg6', top_k=2)); raise SystemExit(0 if r.get('count', 0) >= 1 else 1)" && test "$(sqlite3 /home/svend/DPMtF-WebUI/databases/dpmtf.db "select count(*) from knowledge_retrieval_log where agent_role='dsh' and run_id='trial-1b' and handoff_id='tg6'")" -ge 1
 expect: exit 0
 
 id: TG7
