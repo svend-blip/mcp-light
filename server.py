@@ -1610,6 +1610,12 @@ def _knowledge_failure(status, payload, resolved_scope=None):
             error["scope"] = resolved_scope
         error["detail"] = detail or "the scope guard denied this request"
         return error
+    if status == 404:
+        error = {"error": "unknown_scope"}
+        if resolved_scope:
+            error["scope"] = resolved_scope
+        error["detail"] = detail or "the knowledge service does not know this scope"
+        return error
     if status == 503:
         return {"error": "not_ready",
                 "detail": detail or "the knowledge provider is not ready"}
@@ -1646,8 +1652,112 @@ def _knowledge_http_get(url, params, timeout, headers=None):
         return status, {"detail": body}
 
 
-@mcp.tool(name="knowledge_search", description="Semantic retrieval over the ten repository scopes of the knowledge service, spoken over plain HTTP (provider-neutral). Retrieve before exploring: success returns {scope, provider, count, results:[{path, score, snippet}]}; failures return {error: denied|not_ready|unreachable, detail} (plus scope on denied); disabled layer returns an empty note; never raises. Position fields run_id and handoff_id are forwarded to the endpoint when set; under scope=\"current_repository\" the workspace resolves through the service's /v1/scope-for-path once per process, and an empty flow_key defaults to the workspace path.")
-def tool_knowledge_search(query: str, scope: str = "current_repository", workspace: str = "", top_k: int = 8, token_budget: int = 4000, agent_role: str = "dsh", flow_key: str = "", run_id: str = "", handoff_id: str = "") -> str:
+# The three learning scopes live beside the repository scopes in the same
+# service; ``experience-history`` is reached through ``include_history`` rather
+# than named by a caller, so it is listed only for the scope-name test below.
+LEARNING_SCOPES = ("ecosystem", "experience", "experience-history")
+
+# Fixed budget split of addendum 2 §6: the repository scope gets the largest
+# share, ecosystem and experience an equal smaller one, and an unused learning
+# share flows back to the repository call.
+REPOSITORY_BOTTOM_PERCENT = 60
+LEARNING_SCOPE_PERCENT = 20
+
+
+def _flag_enabled(value, default=True):
+    """Interpret a boolean-ish MCP argument (JSON booleans or their strings)."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if not text:
+            return default
+        return text not in ("false", "0", "no", "off")
+    return bool(value)
+
+
+def _knowledge_budget_split(total):
+    """Return ``(repository_share, learning_share)`` by integer division."""
+    return (total * REPOSITORY_BOTTOM_PERCENT // 100,
+            total * LEARNING_SCOPE_PERCENT // 100)
+
+
+def _knowledge_learning_fields(evidence_level, include_history):
+    """Params the learning scopes take; empty ones stay out of the query."""
+    fields = {}
+    level = str(evidence_level or "").strip()
+    if level:
+        fields["evidence_level"] = level
+    if _flag_enabled(include_history, False):
+        fields["include_history"] = "true"
+    return fields
+
+
+def _knowledge_results(payload, scope_name):
+    """Shape one service answer into the tool's result items.
+
+    ``metadata`` rides through unchanged (``{}`` when the answer carries none),
+    and ``scope`` names the scope the hit came from, so a cross-scope answer
+    still says where each passage lives.
+    """
+    shaped = []
+    for item in payload.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata")
+        shaped.append({
+            "scope": str(item.get("scope") or "").strip() or str(scope_name or ""),
+            "path": item.get("path"),
+            "score": item.get("score"),
+            "snippet": str(item.get("content") or "")[:600],
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        })
+    return shaped
+
+
+def _knowledge_used_tokens(payload):
+    """Whitespace-split token count of the content the service returned."""
+    used = 0
+    for item in payload.get("results") or []:
+        if isinstance(item, dict):
+            used += len(str(item.get("content") or "").split())
+    return used
+
+
+def _knowledge_learning_call(base_url, scope, params, timeout):
+    """Search one learning scope; never raise and never fail the whole call.
+
+    Returns ``(status, shaped_results, used_tokens, provider)`` where ``status``
+    is what ``scopes_searched`` records: ``ok``, ``empty``, ``disabled``, or the
+    mapped error (``denied`` / ``unknown_scope`` / ``not_ready`` /
+    ``unreachable``).
+    """
+    try:
+        result = _knowledge_http_get(base_url + "/v1/search", params, timeout,
+                                     headers=knowledge_service_headers())
+    except Exception as exc:
+        return "unreachable", [], 0, None
+
+    status, payload = _knowledge_unpack(result)
+    if not isinstance(payload, dict):
+        payload = {}
+
+    failure = _knowledge_failure(status, payload, scope)
+    if failure:
+        return str(failure.get("error") or "unreachable"), [], 0, None
+    if not payload.get("enabled", True):
+        return "disabled", [], _knowledge_used_tokens(payload), payload.get("provider")
+
+    shaped = _knowledge_results(payload, scope)
+    used = _knowledge_used_tokens(payload)
+    provider = payload.get("provider")
+    if not shaped:
+        return "empty", [], used, provider
+    return "ok", shaped, used, provider
+
+
+@mcp.tool(name="knowledge_search", description="Semantic retrieval over the knowledge service's repository scopes plus the ecosystem and experience learning scopes, spoken over plain HTTP (provider-neutral). Retrieve before exploring. Default (cross_repo true) consults three scopes in one call - ecosystem, experience, then the repository scope - with the budget split 60 % repository / 20 % ecosystem / 20 % experience and an unused learning share flowing back to the repository call. Success returns {scope, provider, count, results:[{scope, path, score, snippet, metadata}], scopes_searched:[{scope, status, count}]}; results are ordered repository -> ecosystem -> experience, metadata passes the service's per-hit extras through ({} on repository passages), scopes_searched says what was consulted and why a scope gave nothing (ok|empty|denied|unknown_scope|not_ready|unreachable|disabled). evidence_level and include_history are forwarded to the learning calls only (include_history makes the service answer from experience-history). With cross_repo false, or an explicit learning scope, exactly one call is made. Repository-scope failures are the whole answer: {error: denied|not_ready|unreachable|unknown_scope, detail} (plus scope on denied and unknown_scope); disabled returns an empty note; never raises. Position fields run_id and handoff_id are forwarded to every call when set; under scope=\"current_repository\" the workspace resolves through the service's /v1/scope-for-path once per process, and an empty flow_key defaults to the workspace path.")
+def tool_knowledge_search(query: str, scope: str = "current_repository", workspace: str = "", top_k: int = 8, token_budget: int = 4000, agent_role: str = "dsh", flow_key: str = "", run_id: str = "", handoff_id: str = "", cross_repo: bool = True, evidence_level: str = "", include_history: bool = False) -> str:
     """Answer a semantic query through the knowledge service and return JSON.
 
     The service at ``KNOWLEDGE_SERVICE_URL`` answers ``GET /v1/search``; the
@@ -1657,6 +1767,15 @@ def tool_knowledge_search(query: str, scope: str = "current_repository", workspa
     ``scope="current_repository"`` the ``workspace`` path is resolved by the
     service (one cached call per workspace) and an empty ``flow_key`` defaults
     to the trimmed ``workspace`` path; an explicit ``flow_key`` always wins.
+
+    By default the call spans three scopes -- ``ecosystem``, then
+    ``experience``, then the resolved repository scope -- each with its own
+    share of ``token_budget`` and the same position fields, so a DSH session
+    sees what a chain role sees. ``cross_repo=False`` narrows it back to the
+    single repository call; an explicit learning scope is always single. Only
+    the repository answer can fail the call: a learning answer that is
+    refused, unknown, not ready, empty, disabled or missing still counts in
+    ``scopes_searched``, it never hides the repository results.
     """
     query_text = str(query or "").strip()
     if len(query_text) < 2:
@@ -1694,19 +1813,49 @@ def tool_knowledge_search(query: str, scope: str = "current_repository", workspa
             flow_key_value = location.rstrip("/")
 
     base_url = knowledge_service_base_url()
-    params = {
+    position = {
         "q": query_text,
-        "scope": resolved_scope,
         "top_k": top_k_value,
-        "token_budget": budget_value,
         "agent_role": str(agent_role or "").strip() or "dsh",
         "flow_key": flow_key_value,
         "run_id": str(run_id or "").strip(),
         "handoff_id": str(handoff_id or "").strip(),
     }
+    learning_fields = _knowledge_learning_fields(evidence_level, include_history)
+    is_learning_scope = resolved_scope in LEARNING_SCOPES
+    cross_scope = _flag_enabled(cross_repo, True) and not is_learning_scope
+
+    scopes_searched = []
+    learning_results = []
+    learning_providers = []
+    repo_budget = budget_value
+
+    if cross_scope:
+        # Learning scopes first: their unused share is what the repository
+        # call is then allowed to spend on top of its own 60 %.
+        repo_budget, learn_budget = _knowledge_budget_split(budget_value)
+        for learn_scope in ("ecosystem", "experience"):
+            learn_params = dict(position)
+            learn_params["scope"] = learn_scope
+            learn_params["token_budget"] = learn_budget
+            learn_params.update(learning_fields)
+            status, hits, used, provider = _knowledge_learning_call(
+                base_url, learn_scope, learn_params, KNOWLEDGE_TIMEOUT_SECONDS)
+            scopes_searched.append(
+                {"scope": learn_scope, "status": status, "count": len(hits)})
+            learning_results.extend(hits)
+            if provider is not None:
+                learning_providers.append(provider)
+            repo_budget += max(0, learn_budget - used)
+
+    repo_params = dict(position)
+    repo_params["scope"] = resolved_scope
+    repo_params["token_budget"] = repo_budget
+    if not cross_scope and is_learning_scope:
+        repo_params.update(learning_fields)
 
     try:
-        result = _knowledge_http_get(base_url + "/v1/search", params, KNOWLEDGE_TIMEOUT_SECONDS,
+        result = _knowledge_http_get(base_url + "/v1/search", repo_params, KNOWLEDGE_TIMEOUT_SECONDS,
                                      headers=knowledge_service_headers())
     except Exception as exc:
         return json.dumps({"error": "unreachable", "detail": str(exc)}, indent=2)
@@ -1728,21 +1877,27 @@ def tool_knowledge_search(query: str, scope: str = "current_repository", workspa
             "note": "knowledge retrieval is disabled in DPMtF",
         }, indent=2)
 
-    results = []
-    for item in payload.get("results") or []:
-        if not isinstance(item, dict):
-            continue
-        results.append({
-            "path": item.get("path"),
-            "score": item.get("score"),
-            "snippet": str(item.get("content") or "")[:600],
-        })
+    repo_results = _knowledge_results(payload, resolved_scope)
+    scopes_searched.append({
+        "scope": resolved_scope,
+        "status": "ok" if repo_results else "empty",
+        "count": len(repo_results),
+    })
+
+    # Repository hits first: they are the answer, the learning hits are the
+    # cross-repository context around them.
+    results = repo_results + learning_results
+
+    provider = payload.get("provider")
+    if provider is None:
+        provider = learning_providers[0] if learning_providers else None
 
     return json.dumps({
         "scope": resolved_scope,
-        "provider": payload.get("provider"),
+        "provider": provider,
         "count": len(results),
         "results": results,
+        "scopes_searched": scopes_searched,
     }, indent=2)
 
 

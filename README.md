@@ -336,7 +336,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `get_required_frontend_impact_block` | — | Standard Frontend Impact block for output |
 | `search_context` | `query` | Search results in governance/context files |
 | `search_verdicts` | `query` | Search results in verdict files |
-| `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?`, `run_id?`, `handoff_id?` | Semantic retrieval through the knowledge service (`GET /v1/search`) over plain HTTP (provider-neutral): `{scope, provider, count, results:[{path, score, snippet}]}` on success, typed `{error, detail}` otherwise; never raises |
+| `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?`, `run_id?`, `handoff_id?`, `cross_repo?`, `evidence_level?`, `include_history?` | Semantic retrieval through the knowledge service (`GET /v1/search`) over plain HTTP (provider-neutral). Default (`cross_repo: true`) spans three scopes — `ecosystem`, `experience`, then the repository scope — splitting `token_budget` 60 % / 20 % / 20 % and flowing an unused learning share back to the repository call: `{scope, provider, count, results:[{scope, path, score, snippet, metadata}], scopes_searched:[{scope, status, count}]}` on success, typed `{error, detail}` otherwise (`denied`, `unknown_scope`, `not_ready`, `unreachable`); `cross_repo: false` makes exactly one repository call; never raises |
 | `knowledge_scopes` | — | The service's registry from `GET /v1/scopes`: JSON array of `{scope, provider, status, document_count}` — which repositories have memory |
 
 ### Phase 2 — Frontend context
@@ -398,10 +398,12 @@ the flows root come back as `{"error": ...}`; nothing raises.
 
 ### knowledge_search
 
-Semantic retrieval over the ten repository scopes of the knowledge layer,
-spoken over plain HTTP to the standalone knowledge service
-(`GET <base>/v1/search`). The tool is provider-neutral: it knows nothing about
-the search provider behind that endpoint — retrieve before exploring.
+Semantic retrieval over the knowledge layer, spoken over plain HTTP to the
+standalone knowledge service (`GET <base>/v1/search`). The tool is
+provider-neutral: it knows nothing about the search provider behind that
+endpoint — retrieve before exploring. By default one call consults three
+scopes — `ecosystem`, then `experience`, then the resolved repository scope —
+so a DSH session sees what a chain role sees.
 
 Base URL comes from `KNOWLEDGE_SERVICE_URL` (default
 `http://127.0.0.1:9140`), the shared token from `KNOWLEDGE_SERVICE_TOKEN`,
@@ -417,15 +419,44 @@ to resolve current_repository"}` without making a call. When the service is
 unreachable the lookup fails first, so the tool answers
 `{"error": "unreachable", "detail": …}` before any search is attempted.
 
+**Three-scope default and the budget split.** With `cross_repo` true (the
+default) and a repository scope, the tool makes three `GET /v1/search` calls
+through the same transport seam, all carrying the same `agent_role`,
+`flow_key`, `run_id`, `handoff_id` and `top_k`: `ecosystem` first, then
+`experience`, then the repository scope. `token_budget` (after clamping) is
+split by integer division — 60 % repository, 20 % ecosystem, 20 % experience —
+the two learning shares are spent first, and whatever they leave unused (their
+share minus the whitespace-split tokens of the `content` the service returned)
+is added to the repository call's budget: a default 4000 answers with 800 /
+800 / 3800 when each learning answer used 100 tokens. `evidence_level` and
+`include_history` are forwarded to the learning calls only — `include_history`
+makes the service answer from `experience-history` — and the repository call
+never carries them. `cross_repo: false` makes exactly one repository call; an
+explicit learning scope (`ecosystem`, `experience`, `experience-history`) is
+always a single call and does forward the two fields. A learning scope that
+answers 403, 404, 503, a disabled envelope, an empty list, or raises
+contributes no results and is only recorded in `scopes_searched`; the
+repository answer is the only one that can fail the call.
+
 `knowledge_scopes` is the discovery half: `GET <base>/v1/scopes` as a JSON
 array of `{scope, provider, status, document_count}`, so an agent can see which
 repositories have memory before picking a scope. Same error shapes.
 
-Shapes: success is `{"scope", "provider", "count", "results": [{"path",
-"score", "snippet"}]}` with each snippet the result content cut to 600
-characters; a disabled layer returns `{"scope", "count": 0, "results": [],
-"note": "knowledge retrieval is disabled in DPMtF"}`. Errors: HTTP 403 →
-`{"error": "denied", "scope", "detail"}`; HTTP 503 → `{"error": "not_ready",
+Shapes: success is `{"scope", "provider", "count", "results": [{"scope",
+"path", "score", "snippet", "metadata"}], "scopes_searched": [{"scope",
+"status", "count"}]}` — `scope` is the repository scope (or the single explicit
+scope), `count` the number of returned results across the consulted scopes,
+`results` ordered repository → ecosystem → experience with each snippet the
+result content cut to 600 characters, `metadata` the service's per-hit extras
+passed through unchanged (`{}` on repository passages; learning hits carry
+`evidence_level`, `repository`, `family`, `run`, `confidence`, plus `origin` or
+`superseded_by`/`retracted_at` where present), and `scopes_searched` one entry
+per call in call order with `status` ∈ `ok`, `empty`, `denied`,
+`unknown_scope`, `not_ready`, `unreachable`, `disabled`. A disabled layer
+returns `{"scope", "count": 0, "results": [], "note": "knowledge retrieval is
+disabled in DPMtF"}`. Errors (from the repository call): HTTP 403 →
+`{"error": "denied", "scope", "detail"}`; HTTP 404 → `{"error":
+"unknown_scope", "scope", "detail"}`; HTTP 503 → `{"error": "not_ready",
 "detail"}`; any other failure → `{"error": "unreachable", "detail"}` — the
 tool never raises. Bounds are clamped before the call (`top_k` 1–20,
 `token_budget` 200–12000); a query shorter than two characters returns
@@ -446,7 +477,11 @@ are configured outside this repository.
 retrieve before exploring: read `status` + `next_goal` from scope-mcp, then
 call `knowledge_search` carrying the goal id (`handoff_id`), the objective
 (`run_id`) and the workspace, then open at most the three highest-scoring
-paths before any grep. The reviewer installs it into
+paths before any grep. That one call spans the repository, `ecosystem` and
+`experience`; the skill tells the agent to read `metadata.evidence_level`
+before trusting an experience hit, to pass `include_history: true` when a
+conclusion looks outdated, and to read `scopes_searched` when the answer is
+thin. The reviewer installs it into
 `~/.agents/skills/knowledge-first/` outside this repository.
 
 ---
