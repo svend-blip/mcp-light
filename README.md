@@ -323,7 +323,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 ---
 
-## Available Tools (32)
+## Available Tools (33)
 
 ### Phase 1 — Context retrieval
 
@@ -339,6 +339,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 | `knowledge_search` | `query`, `scope?`, `workspace?`, `top_k?`, `token_budget?`, `agent_role?`, `flow_key?`, `run_id?`, `handoff_id?`, `cross_repo?`, `evidence_level?`, `include_history?` | Semantic retrieval through the knowledge service (`GET /v1/search`) over plain HTTP (provider-neutral). Default (`cross_repo: true`) spans three scopes — `ecosystem`, `experience`, then the repository scope — splitting `token_budget` 60 % / 20 % / 20 % and flowing an unused learning share back to the repository call: `{scope, provider, count, results:[{scope, path, score, snippet, metadata}], scopes_searched:[{scope, status, count}]}` on success, typed `{error, detail}` otherwise (`denied`, `unknown_scope`, `not_ready`, `unreachable`); `cross_repo: false` makes exactly one repository call; never raises |
 | `knowledge_scopes` | — | The service's registry from `GET /v1/scopes`: JSON array of `{scope, provider, status, document_count}` — which repositories have memory |
 | `knowledge_learning` | `view?` (`admitted`/`history`/`drafts`), `pending_only?`, `family?` | Read-only inventory of closed-run learning from `GET /v1/learning` (`history=true` for superseded/retracted) or `GET /v1/learning/drafts` (`pending=true` for still-pending ones): `{view, count, artifacts}` — `{view, count, drafts}` for drafts — rows passed through unchanged, `family` filtered client-side; typed `{error, detail}` (`denied`, `unknown_scope`, `not_ready`, `unreachable`, `unknown view`); never raises |
+| `knowledge_retrievals` | `run_id?`, `handoff_id?`, `flow_key?`, `agent_role?`, `scope?`, `since?`, `until?`, `limit?`, `summary?` | Read-only view of the service's retrieval log from `GET /v1/retrievals`: every search it served, newest first, with `provider`, `scope`, `query`, `result_count`, `sources`, `retrieved_token_count`, `retrieval_duration_ms`, `agent_role`, `run_id`, `handoff_id`, `flow_key`, `created_at`. Filters combine with AND and unset ones stay out of the query string; `limit` is clamped to 1..200 here (the service clamps again at 500); `summary: true` answers the aggregate (`retrievals`, `results`, `tokens`, `duration_ms`, `scopes`, `agent_roles`, `first`, `last`) instead of rows. The service's dict passes through with each row's `query` cut to 200 characters and its `sources` to the first 5 entries; typed `{error, detail}` (`denied`, `unknown_scope`, `not_ready`, `unreachable`); never raises |
 
 ### Phase 2 — Frontend context
 
@@ -512,6 +513,54 @@ describes what survives the filter. Errors keep the `knowledge_search` shapes �
 403 → `denied`, 404 → `unknown_scope`, 503 → `not_ready`, any other transport
 failure or a raised seam → `unreachable` — and the tool never raises, so a cold
 machine still gets an answer it can act on.
+
+### knowledge_retrievals
+
+The audit half of the same service: what the knowledge layer actually answered,
+one row per served search. One read-only `GET <base>/v1/retrievals` per call
+through the same transport seam and the same token header — no scope guard is
+involved, nothing is cached in `_SCOPE_CACHE`, and the tool never raises.
+
+Filters are optional and combine with AND: `run_id`, `handoff_id`, `flow_key`,
+`agent_role`, `scope`, `since` and `until`. Only the ones that were given go
+into the query string, so an unset filter never narrows the answer. `limit` is
+coerced to an int and clamped to 1..200 before the call (the service clamps
+again at 500); rows come back newest first with `provider`, `scope`, `query`,
+`result_count`, `sources`, `retrieved_token_count`, `retrieval_duration_ms`,
+`agent_role`, `run_id`, `handoff_id`, `flow_key` and `created_at`. `summary:
+true` adds `summary=true` and otherwise changes nothing: the answer is the
+aggregate — `retrievals`, `results`, `tokens`, `duration_ms`, `scopes`,
+`agent_roles`, `first` and `last`.
+
+The service's dict is returned as it wrote it, except that each row's `query` is
+cut to 200 characters and its `sources` list to the first 5 entries, so a large
+page cannot flood a model's context. Errors keep the `knowledge_search` shapes —
+403 → `denied`, 404 → `unknown_scope`, 503 → `not_ready`, any other transport
+failure or a raised seam → `unreachable`.
+
+What did this run retrieve?
+
+```json
+{"name": "knowledge_retrievals", "arguments": {"run_id": "046", "limit": 50}}
+```
+
+Has this role retrieved today?
+
+```json
+{"name": "knowledge_retrievals",
+ "arguments": {"agent_role": "dsh", "since": "2026-09-15T00:00:00", "summary": true}}
+```
+
+How much has one scope served this week?
+
+```json
+{"name": "knowledge_retrievals",
+ "arguments": {"scope": "dpmtf-webui", "since": "2026-09-08T00:00:00", "summary": true}}
+```
+
+Supervising and reviewing roles learn this step in the `knowledge-first` skill:
+after a run closes, read its rows by `run_id`; to see whether a role retrieves at
+all, ask for the summary instead.
 
 ---
 

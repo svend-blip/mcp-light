@@ -2009,6 +2009,102 @@ def tool_knowledge_learning(view: str = "admitted", pending_only: bool = False,
     return json.dumps(answer, indent=2)
 
 
+# Bounds this tool applies before the call, so one page cannot flood a model's
+# context: the service clamps ``limit`` again at 500, the tighter bound here is
+# what a supervising session actually wants to read.
+RETRIEVAL_LIMIT_DEFAULT = 20
+RETRIEVAL_LIMIT_MAX = 200
+RETRIEVAL_QUERY_CHARS = 200
+RETRIEVAL_SOURCES_KEPT = 5
+
+
+def _retrieval_limit(value):
+    """Coerce a ``limit`` argument to an int clamped to 1..200."""
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        size = RETRIEVAL_LIMIT_DEFAULT
+    return min(max(size, 1), RETRIEVAL_LIMIT_MAX)
+
+
+def _trim_retrieval_answer(payload):
+    """Shorten each row's ``query`` and ``sources``; everything else untouched.
+
+    Rows are the service's own dicts, so the copy only shortens the two fields
+    that grow without bound. A summary answer (no ``rows`` list) and any
+    non-object answer pass through unchanged.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return payload
+
+    trimmed = []
+    for row in rows:
+        if not isinstance(row, dict):
+            trimmed.append(row)
+            continue
+        row = dict(row)
+        query = str(row.get("query") or "")
+        if len(query) > RETRIEVAL_QUERY_CHARS:
+            row["query"] = query[:RETRIEVAL_QUERY_CHARS]
+        sources = row.get("sources")
+        if isinstance(sources, list) and len(sources) > RETRIEVAL_SOURCES_KEPT:
+            row["sources"] = sources[:RETRIEVAL_SOURCES_KEPT]
+        trimmed.append(row)
+
+    answer = dict(payload)
+    answer["rows"] = trimmed
+    return answer
+
+
+@mcp.tool(name="knowledge_retrievals", description="Read-only view of the knowledge service's retrieval log, straight from GET /v1/retrievals: every search the service served, newest first, with provider, scope, query, result_count, sources, retrieved_token_count, retrieval_duration_ms, agent_role, run_id, handoff_id, flow_key and created_at. Optional filters combine with AND: run_id, handoff_id, flow_key, agent_role, scope, since, until; limit is clamped 1..200 here (the service clamps again at 500); summary=true answers the aggregate instead of rows (retrievals, results, tokens, duration_ms, scopes, agent_roles, first, last). Use it after a run closes to see what that run looked up, or with summary=true to see whether a role retrieves at all. The service's answer passes through with each row's query cut to 200 characters and sources to the first 5 entries. Errors are reported, never raised: {error: denied|unknown_scope|not_ready|unreachable, detail}.")
+def tool_knowledge_retrievals(run_id: str = "", handoff_id: str = "",
+                              flow_key: str = "", agent_role: str = "",
+                              scope: str = "", since: str = "", until: str = "",
+                              limit: int = RETRIEVAL_LIMIT_DEFAULT,
+                              summary: bool = False) -> str:
+    """Page the knowledge service's retrieval log over one GET.
+
+    ``GET <base>/v1/retrievals`` through the same transport seam and token
+    header as the other knowledge tools; only the filters that were given go
+    into the query string, so an unset one never narrows the answer. ``limit``
+    is coerced to an int and clamped to 1..200 before the call, and
+    ``summary: true`` adds ``summary=true`` without otherwise changing the
+    call. The service's dict is returned as it wrote it — rows newest first —
+    except that each row's ``query`` is cut to 200 characters and its
+    ``sources`` to the first 5 entries. Failures keep the ``knowledge_search``
+    shapes (``denied``, ``unknown_scope``, ``not_ready``, ``unreachable``) and
+    never raise; no scope lookup is involved.
+    """
+    params = {}
+    for name, value in (("run_id", run_id), ("handoff_id", handoff_id),
+                        ("flow_key", flow_key), ("agent_role", agent_role),
+                        ("scope", scope), ("since", since), ("until", until)):
+        cleaned = str(value).strip() if value is not None else ""
+        if cleaned:
+            params[name] = cleaned
+    params["limit"] = _retrieval_limit(limit)
+    if _flag_enabled(summary, False):
+        params["summary"] = "true"
+
+    try:
+        result = _knowledge_http_get(knowledge_service_base_url() + "/v1/retrievals",
+                                     params, KNOWLEDGE_TIMEOUT_SECONDS,
+                                     headers=knowledge_service_headers())
+    except Exception as exc:
+        return json.dumps({"error": "unreachable", "detail": str(exc)}, indent=2)
+
+    status, payload = _knowledge_unpack(result)
+
+    failure = _knowledge_failure(status, payload)
+    if failure:
+        return json.dumps(failure, indent=2)
+
+    return json.dumps(_trim_retrieval_answer(payload), indent=2)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
 
